@@ -95,6 +95,8 @@ pub struct Features {
     pub privacy_pause: bool,
     /// Carry modifier + left drag through a pile writes in the snow.
     pub write_in_snow: bool,
+    /// Flying snow and snowballs cross from one monitor to the next.
+    pub cross_monitor: bool,
     /// Opt-in: follow the real weather of `weather_city` (Open-Meteo).
     pub real_weather: bool,
     /// City name for real weather mode, e.g. "Istanbul". Never auto-detected.
@@ -113,6 +115,7 @@ impl Default for Features {
             music_wind: false,
             privacy_pause: true,
             write_in_snow: true,
+            cross_monitor: true,
             real_weather: false,
             weather_city: String::new(),
         }

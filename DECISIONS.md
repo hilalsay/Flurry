@@ -254,3 +254,7 @@ decided and why.
   it by 12 s, and every groove fills in after 120 s anyway (or once the snow under it has melted).
   While writing, the drag doesn't scoop or push snowballs. Pressing on a ball still picks it up.
   Checked with a scripted "HI" rendered to PNG.
+- **Phase 8 / feature 10, snow moves between monitors** (`features.cross_monitor = true`). Flying
+  snow and snowballs were already simulated in global coordinates; a two-monitor test now checks that
+  snow thrown from monitor A reaches and is drawn on monitor B. With `cross_monitor = false`, flying
+  snow stops at the side edge of the monitor it is on.

@@ -44,6 +44,8 @@ pub struct SimParams {
     pub snow_globe: bool,
     /// Feature: modifier + drag writes in the snow.
     pub write_in_snow: bool,
+    /// Feature: flying snow crosses monitor borders.
+    pub cross_monitor: bool,
 }
 
 impl SimParams {
@@ -65,6 +67,7 @@ impl SimParams {
                 .then_some(c.features.frost_idle_minutes.max(0.0) * 60.0),
             snow_globe: c.features.snow_globe,
             write_in_snow: c.features.write_in_snow,
+            cross_monitor: c.features.cross_monitor,
         }
     }
 }
@@ -252,7 +255,9 @@ impl World {
             &bounds,
             |f, y_before| f.layer.collides() && piles.try_land(f.x, y_before, f.y, f.r, max_h),
         );
-        self.particles.step(dt, &bounds, |p, y_before| {
+        let monitors: Vec<Rect> = inputs.outputs.iter().map(|o| o.rect).collect();
+        let confine = (!self.params.cross_monitor).then_some(monitors.as_slice());
+        self.particles.step(dt, &bounds, confine, |p, y_before| {
             piles.land(p.x, y_before, p.y, p.radius(), p.volume, max_h)
         });
         if self.params.typing_shakes_snow && inputs.keys_pressed > 0 {
@@ -485,6 +490,68 @@ mod tests {
         );
         w.clear_settled();
         assert_eq!(w.piles().volume(), 0.0);
+    }
+
+    fn two_monitors() -> Inputs {
+        Inputs {
+            outputs: vec![
+                output("A", Rect::new(0, 0, 1920, 1080)),
+                output("B", Rect::new(1920, 0, 1920, 1080)),
+            ],
+            ..Inputs::default()
+        }
+    }
+
+    /// Throw snow from near A's right edge towards B; return the largest x
+    /// any particle reached, and whether B's scene ever drew one.
+    fn throw_across(cross: bool) -> (f32, bool) {
+        let mut w = World::new(
+            SimParams {
+                cross_monitor: cross,
+                flake_count: 0,
+                ..SimParams::default()
+            },
+            1,
+        );
+        let inputs = two_monitors();
+        w.step(1.0 / 60.0, &inputs);
+        for k in 0..20 {
+            w.particles.spawn(
+                particles::Particle {
+                    x: 1850.0,
+                    y: 400.0 + k as f32,
+                    vx: 900.0,
+                    vy: -200.0,
+                    volume: 30.0,
+                },
+                0.0,
+            );
+        }
+        let renderer = crate::render::Renderer::new();
+        let b = inputs.outputs[1].rect;
+        let mut tracker = crate::render::PileTracker::default();
+        let mut scene = crate::render::PileScene::default();
+        let (mut max_x, mut drawn_on_b) = (0.0f32, false);
+        for _ in 0..60 {
+            w.step(1.0 / 60.0, &inputs);
+            for p in w.particles().iter() {
+                max_x = max_x.max(p.x);
+            }
+            renderer.build_pile_scene(&w, b, &mut tracker, &mut scene);
+            drawn_on_b |= !scene.draws.is_empty();
+        }
+        (max_x, drawn_on_b)
+    }
+
+    #[test]
+    fn flying_snow_crosses_monitors() {
+        let (max_x, drawn_on_b) = throw_across(true);
+        assert!(max_x > 2000.0, "reached monitor B: {max_x}");
+        assert!(drawn_on_b, "and B drew it");
+        let (max_x, drawn_on_b) = throw_across(false);
+        // (Sprites of snow resting at the edge may overlap B by a pixel.)
+        assert!(max_x < 1920.0, "stopped at A's edge: {max_x}");
+        let _ = drawn_on_b;
     }
 
     /// PLAN.md Phase 1: one step with 300 flakes takes < 0.2 ms.
