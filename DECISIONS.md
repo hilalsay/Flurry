@@ -222,3 +222,7 @@ decided and why.
   once, so it works offline. The city is only ever taken from the config. Checked live with a
   neutral city (Oslo) and temporary dirs: geocoding, forecast and cache all work. `flurry status`
   now shows the effective intensity/fps (weather, battery).
+- **Phase 8 / feature 6, snow globe** (`features.snow_globe = true`, needs `interaction`). Four
+  direction changes of the pointer at ≥ 900 px/s within 0.8 s count as a shake. 70% of the snow on
+  piles within 260 px of the pointer is lifted (snow is conserved), as particles thrown upward and
+  counter-clockwise around the pointer. They whirl, fall and settle again. 1.5 s cooldown.

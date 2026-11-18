@@ -87,6 +87,8 @@ pub struct Features {
     pub frost: bool,
     /// Minutes without mouse movement before frost starts.
     pub frost_idle_minutes: f32,
+    /// Shaking the mouse whirls settled snow up like a snow globe.
+    pub snow_globe: bool,
     /// Opt-in: follow the real weather of `weather_city` (Open-Meteo).
     pub real_weather: bool,
     /// City name for real weather mode, e.g. "Istanbul". Never auto-detected.
@@ -101,6 +103,7 @@ impl Default for Features {
             typing_shakes_snow: true,
             frost: true,
             frost_idle_minutes: 3.0,
+            snow_globe: true,
             real_weather: false,
             weather_city: String::new(),
         }

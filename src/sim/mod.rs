@@ -3,6 +3,7 @@
 
 pub mod flakes;
 pub mod frost;
+pub mod globe;
 pub mod icicles;
 pub mod particles;
 pub mod piles;
@@ -39,6 +40,8 @@ pub struct SimParams {
     pub typing_shakes_snow: bool,
     /// Feature: frost when idle, after this many seconds (`None` = off).
     pub frost_after: Option<f32>,
+    /// Feature: shake the mouse to whirl snow up.
+    pub snow_globe: bool,
 }
 
 impl SimParams {
@@ -58,6 +61,7 @@ impl SimParams {
                 .features
                 .frost
                 .then_some(c.features.frost_idle_minutes.max(0.0) * 60.0),
+            snow_globe: c.features.snow_globe,
         }
     }
 }
@@ -82,6 +86,7 @@ pub struct World {
     snowfolk: Snowfolk,
     icicles: icicles::Icicles,
     frost: frost::Frost,
+    globe: globe::Globe,
     /// The layout the piles were last synced to.
     layout: Layout,
 }
@@ -121,6 +126,7 @@ impl World {
             snowfolk: Snowfolk::default(),
             icicles: icicles::Icicles::default(),
             frost: frost::Frost::default(),
+            globe: globe::Globe::default(),
             layout: Layout::default(),
         }
     }
@@ -266,6 +272,15 @@ impl World {
         if self.params.icicles {
             self.icicles
                 .step(dt, inputs, &mut self.piles, &mut self.particles, bounds);
+        }
+        if self.params.snow_globe && self.params.interaction {
+            let cursor = inputs.cursor;
+            if self
+                .globe
+                .step(self.time, cursor, &mut self.piles, &mut self.particles)
+            {
+                log::debug!("snow globe shake");
+            }
         }
         match self.params.frost_after {
             Some(after) => self.frost.step(dt, &inputs.outputs, inputs.cursor, after),
