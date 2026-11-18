@@ -158,3 +158,27 @@ decided and why.
   pictures. They are composited on the top window and only redrawn when they move or when something
   else clears their area. They are drawn in front of everything (not clipped by windows above them).
 - **Phase 6:** Wayland play mode stays in Phase 9.
+- **Phase 7: automatic pauses.** User pause (toggle/tray/hotkey) and automatic reasons combine, and
+  the snow shows only when neither applies. `flurry status` names the reasons, e.g.
+  `auto-paused(fullscreen)`. Verified live on Cinnamon:
+  - **fullscreen**: the active window (`_NET_ACTIVE_WINDOW`) has `_NET_WM_STATE_FULLSCREEN`, checked
+    whenever the window list changes (`auto_pause_fullscreen`);
+  - **Do Not Disturb**: `org.cinnamon.desktop.notifications display-notifications` (verified on
+    Mint: `false` = DND on), read at start and followed with a `gsettings monitor` child process (no
+    dconf internals);
+  - **lock**: logind's session `LockedHint` (session from `$XDG_SESSION_ID`, falling back to
+    `GetSessionByPID`) plus its `PropertiesChanged` signal. **Cinnamon's own screensaver
+    `GetActive` is not trusted:** on this machine it returned `true` (active for 46 minutes) in an
+    unlocked session, while logind correctly said `LockedHint = false`. Screensaver `ActiveChanged`
+    signals (blanking) still pause/resume;
+  - **sleep**: logind `PrepareForSleep`. On wake, flurry re-reads monitors, panels and windows and
+    redraws everything. Not tested live (it would suspend the machine).
+- **Phase 7: battery mode.** Every 10 s flurry reads `/sys/class/power_supply`. On battery
+  (adapter offline, or no adapter and a battery discharging) it runs half the flakes at ≤ 30 fps.
+  The configured values stay what the tray shows.
+- **Phase 7:** `--install-autostart` / `--remove-autostart` write/remove
+  `~/.config/autostart/flurry.desktop` (Exec = the running binary, `X-GNOME-Autostart-Delay=5` so the
+  panel and compositor are up first).
+- **Phase 7:** New dependency **`zbus`** (planned in §3; already built by ksni, same 5.19 version
+  with `async-io` + `blocking-api`, so nothing new to compile). BadWindow X errors from windows
+  closing between queries are logged at debug, not warn.

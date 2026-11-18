@@ -322,7 +322,7 @@ The first instance owns the socket; later invocations send the command and exit.
 | 4 | Two-window layering + piles on panel and screen bottom | ✅ (manual check by me) |
 | 5 | Piles on windows | ✅ (manual check by me) |
 | 6 | Snowballs and snowman | ✅ (manual check by me) |
-| 7 | Being a good citizen (auto-pause, battery, autostart) | |
+| 7 | Being a good citizen (auto-pause, battery, autostart) | ✅ (manual check by me) |
 | 8 | Signature features (§12) | |
 | 9 | Wayland + KDE (layer-shell, KWin script) — deferred | |
 | 10 | Packaging (.deb for Mint first, then AppImage, AUR) | |

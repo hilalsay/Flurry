@@ -33,7 +33,22 @@ fn main() -> Result<()> {
 
 fn run_daemon(cli: &Cli, config_path: &Path) -> Result<()> {
     if cli.install_autostart {
-        anyhow::bail!("--install-autostart is not implemented yet (phase 7)");
+        let exe = std::env::current_exe().context("cannot find the flurry binary")?;
+        let path = flurry::autostart::install(&flurry::autostart::dir()?, &exe)?;
+        println!("flurry will start at login ({})", path.display());
+        return Ok(());
+    }
+    if cli.remove_autostart {
+        let removed = flurry::autostart::remove(&flurry::autostart::dir()?)?;
+        println!(
+            "{}",
+            if removed {
+                "autostart removed"
+            } else {
+                "autostart wasn't installed"
+            }
+        );
+        return Ok(());
     }
     let config = Config::load(config_path)?;
     log::debug!("config from {}: {config:?}", config_path.display());

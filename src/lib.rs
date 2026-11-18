@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod art;
+pub mod autostart;
 pub mod cli;
 pub mod config;
 pub mod geom;

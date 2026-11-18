@@ -503,6 +503,7 @@ dependencies = [
  "tiny-skia",
  "toml",
  "x11rb",
+ "zbus",
 ]
 
 [[package]]

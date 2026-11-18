@@ -98,6 +98,7 @@ struct Client {
     /// Mapped, not minimized, on the current workspace.
     visible: bool,
     collects: bool,
+    fullscreen: bool,
 }
 
 /// Re-query the window list at least this often, and at most this often.
@@ -220,6 +221,8 @@ pub struct X11Backend {
     /// Clients we receive PropertyNotify from.
     watched: HashSet<Window>,
     windows_queried: Option<Instant>,
+    /// The focused window is fullscreen.
+    fullscreen: bool,
 }
 
 impl X11Backend {
@@ -299,6 +302,7 @@ impl X11Backend {
             hidden: Vec::new(),
             watched: HashSet::new(),
             windows_queried: None,
+            fullscreen: false,
         };
         if let Some(hk) = opts.hotkey {
             backend.hotkey = backend.grab_hotkey(hk)?;
@@ -920,6 +924,7 @@ impl X11Backend {
                 size_delta: (0, 0),
                 visible,
                 collects: visible && normal && !maximized && !fullscreen,
+                fullscreen: visible && fullscreen,
             });
         }
         // Second pass: the geometry ConfigureNotify will report for each
@@ -985,10 +990,26 @@ impl X11Backend {
         changed
     }
 
+    /// Is the active window fullscreen? Returns true if that changed.
+    fn update_fullscreen(&mut self) -> Result<bool> {
+        let active = self
+            .window_list(self.atoms._NET_ACTIVE_WINDOW)?
+            .first()
+            .copied()
+            .unwrap_or(x11rb::NONE);
+        let fs = self.clients.iter().any(|c| c.id == active && c.fullscreen);
+        let changed = fs != self.fullscreen;
+        if changed {
+            log::debug!("active window {active:#x} fullscreen: {fs}");
+        }
+        self.fullscreen = fs;
+        Ok(changed)
+    }
+
     fn refresh_windows(&mut self) -> Result<bool> {
         self.windows_queried = Some(Instant::now());
         self.clients = self.query_clients()?;
-        let changed = self.publish_windows();
+        let changed = self.update_fullscreen()? | self.publish_windows();
         if changed {
             for c in &self.clients {
                 log::debug!(
@@ -1154,6 +1175,10 @@ impl X11Backend {
                 }
             }
             Event::RandrScreenChangeNotify(_) | Event::RandrNotify(_) => p.outputs_changed = true,
+            // Windows can vanish between our queries; that's not a problem.
+            Event::Error(e) if e.error_kind == x11rb::protocol::ErrorKind::Window => {
+                log::debug!("X11: window {:#x} went away", e.bad_value);
+            }
             Event::Error(e) => log::warn!("X11 error: {e:?}"),
             _ => {}
         }
@@ -1524,6 +1549,25 @@ impl Backend for X11Backend {
 
     fn hidden_windows(&self) -> &[u64] {
         &self.hidden
+    }
+
+    fn fullscreen(&self) -> bool {
+        self.fullscreen
+    }
+
+    fn rescan(&mut self) -> Result<Vec<BackendEvent>> {
+        let mut events = Vec::new();
+        if self.rebuild_if_outputs_changed()? {
+            events.push(BackendEvent::OutputsChanged);
+        }
+        if self.refresh_docks()? {
+            events.push(BackendEvent::ObstaclesChanged);
+        }
+        if self.refresh_windows()? {
+            events.push(BackendEvent::WindowsChanged);
+        }
+        events.extend((0..self.surfaces.len()).map(BackendEvent::Redraw));
+        Ok(events)
     }
 
     fn cursor(&mut self) -> Option<CursorState> {

@@ -30,6 +30,10 @@ pub struct Cli {
     #[arg(long)]
     pub install_autostart: bool,
 
+    /// Remove ~/.config/autostart/flurry.desktop and exit.
+    #[arg(long, conflicts_with = "install_autostart")]
+    pub remove_autostart: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }

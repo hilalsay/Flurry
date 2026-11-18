@@ -1,7 +1,8 @@
 //! The daemon: backend + world + renderer + controls + main loop
 //! (PLAN.md §4 "Main loop").
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -11,6 +12,7 @@ use crate::config::{Config, Intensity};
 use crate::geom::{Inputs, OutputInfo, Rect};
 use crate::ipc::{self, Command, Request};
 use crate::platform::{self, Backend, BackendEvent, BackendKind, BackendOptions, Frame, Hotkey};
+use crate::power::{self, PauseReason};
 use crate::render::{Damage, PileScene, PileTracker, Renderer, Scene};
 use crate::sim::{SimParams, World};
 use crate::tray::{Tray, TrayState};
@@ -23,6 +25,9 @@ const MAX_CATCH_UP: Duration = Duration::from_millis(250);
 const MAX_WAIT: Duration = Duration::from_millis(100);
 /// Log frame timings this often at debug level.
 const STATS_EVERY: Duration = Duration::from_secs(10);
+/// How often to check whether we run on battery.
+const BATTERY_POLL: Duration = Duration::from_secs(10);
+const POWER_SUPPLY: &str = "/sys/class/power_supply";
 
 pub struct RunOptions {
     pub backend: Option<BackendKind>,
@@ -116,6 +121,7 @@ pub fn run(config: Config, opts: &RunOptions) -> Result<()> {
         backend.name(),
         backend.outputs().len()
     );
+    let _watchers = power::watch(&tx, true);
     let tray = Tray::spawn(tx, tray_state(&config, false));
     let mut main = MainLoop::new(config, opts.config_path.clone(), backend.as_mut(), rx, tray);
     let result = main.run();
@@ -140,7 +146,14 @@ struct MainLoop<'b> {
     surfaces: Vec<Surface>,
     inputs: Inputs,
     frame_interval: Duration,
+    /// Paused by the user (toggle, tray, hotkey).
     paused: bool,
+    /// Paused automatically (sleep, lock, DND, fullscreen).
+    auto_paused: BTreeSet<PauseReasonKey>,
+    /// What the screen currently shows (false = cleared).
+    showing: bool,
+    on_battery: bool,
+    battery_checked: Option<Instant>,
     commands: Receiver<Request>,
     tray: Option<Tray>,
     stats: Stats,
@@ -151,6 +164,27 @@ struct Stats {
     since: Option<Instant>,
     frames: u32,
     busy: Duration,
+}
+
+/// `PauseReason` ordered by name, for stable status output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct PauseReasonKey(&'static str, u8);
+
+impl From<PauseReason> for PauseReasonKey {
+    fn from(r: PauseReason) -> Self {
+        PauseReasonKey(r.name(), r as u8)
+    }
+}
+
+/// The config as it applies right now: on battery, half the flakes and at
+/// most 30 fps.
+fn effective(config: &Config, on_battery: bool) -> Config {
+    let mut c = config.clone();
+    if on_battery {
+        c.flake_count = Some(c.effective_flake_count() / 2);
+        c.fps = c.fps.min(30);
+    }
+    c
 }
 
 /// What the main loop should do after a command.
@@ -184,6 +218,10 @@ impl<'b> MainLoop<'b> {
             config,
             config_path,
             paused: false,
+            auto_paused: BTreeSet::new(),
+            showing: true,
+            on_battery: false,
+            battery_checked: None,
             commands,
             tray,
             stats: Stats::default(),
@@ -197,25 +235,14 @@ impl<'b> MainLoop<'b> {
         loop {
             let until_frame = next_frame.saturating_duration_since(Instant::now());
             for event in self.backend.dispatch(until_frame.min(MAX_WAIT))? {
-                match event {
-                    BackendEvent::OutputsChanged => self.outputs_changed(),
-                    BackendEvent::Hotkey => self.set_paused(!self.paused)?,
-                    BackendEvent::ObstaclesChanged => {
-                        self.inputs.obstacles = self.backend.obstacles().to_vec();
-                    }
-                    BackendEvent::WindowsChanged => self.windows_changed(),
-                    BackendEvent::Redraw(i) => {
-                        if let Some(s) = self.surfaces.get_mut(i) {
-                            s.invalidate();
-                        }
-                    }
-                }
+                self.handle_event(event)?;
             }
             if let Flow::Quit = self.handle_commands()? {
                 return Ok(());
             }
+            self.check_battery();
             let now = Instant::now();
-            if self.paused {
+            if !self.showing {
                 // Resume without a jump in the simulation.
                 (last, next_frame) = (now, now);
                 continue;
@@ -245,6 +272,71 @@ impl<'b> MainLoop<'b> {
         }
     }
 
+    fn handle_event(&mut self, event: BackendEvent) -> Result<()> {
+        match event {
+            BackendEvent::OutputsChanged => self.outputs_changed(),
+            BackendEvent::Hotkey => {
+                self.paused = !self.paused;
+                self.update_visibility()?;
+            }
+            BackendEvent::ObstaclesChanged => {
+                self.inputs.obstacles = self.backend.obstacles().to_vec();
+            }
+            BackendEvent::WindowsChanged => {
+                self.windows_changed();
+                let fs = self.config.auto_pause_fullscreen && self.backend.fullscreen();
+                self.set_auto(PauseReason::Fullscreen, fs)?;
+            }
+            BackendEvent::Redraw(i) => {
+                if let Some(s) = self.surfaces.get_mut(i) {
+                    s.invalidate();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn set_auto(&mut self, reason: PauseReason, on: bool) -> Result<()> {
+        let key = PauseReasonKey::from(reason);
+        let changed = if on {
+            self.auto_paused.insert(key)
+        } else {
+            self.auto_paused.remove(&key)
+        };
+        if changed {
+            log::info!(
+                "auto-pause {}: {}",
+                reason.name(),
+                if on { "on" } else { "off" }
+            );
+            self.update_visibility()?;
+        }
+        Ok(())
+    }
+
+    fn check_battery(&mut self) {
+        if self
+            .battery_checked
+            .is_some_and(|t| t.elapsed() < BATTERY_POLL)
+        {
+            return;
+        }
+        self.battery_checked = Some(Instant::now());
+        let on = power::on_battery(Path::new(POWER_SUPPLY));
+        if on != self.on_battery {
+            self.on_battery = on;
+            log::info!(
+                "{}",
+                if on {
+                    "on battery: half the flakes, at most 30 fps"
+                } else {
+                    "on mains power"
+                }
+            );
+            self.apply_config();
+        }
+    }
+
     fn handle_commands(&mut self) -> Result<Flow> {
         while let Ok(req) = self.commands.try_recv() {
             log::debug!("command: {}", req.cmd.encode());
@@ -265,8 +357,13 @@ impl<'b> MainLoop<'b> {
     fn execute(&mut self, cmd: Command) -> Result<(String, Flow)> {
         let answer = match cmd {
             Command::Toggle => {
-                self.set_paused(!self.paused)?;
-                if self.paused { "paused" } else { "resumed" }.to_owned()
+                self.paused = !self.paused;
+                self.update_visibility()?;
+                match (self.paused, self.auto_reasons()) {
+                    (true, _) => "paused".to_owned(),
+                    (false, None) => "resumed".to_owned(),
+                    (false, Some(why)) => format!("resumed (still paused while: {why})"),
+                }
             }
             Command::Clear => {
                 self.world.clear_settled();
@@ -288,6 +385,16 @@ impl<'b> MainLoop<'b> {
             Command::Reload => self.reload()?,
             Command::Status => self.status(),
             Command::Quit => return Ok(("quitting".into(), Flow::Quit)),
+            Command::Auto(reason, on) => {
+                self.set_auto(reason, on)?;
+                "ok".into()
+            }
+            Command::Wake => {
+                for event in self.backend.rescan()? {
+                    self.handle_event(event)?;
+                }
+                "ok".into()
+            }
         };
         Ok((answer, Flow::Continue))
     }
@@ -296,7 +403,11 @@ impl<'b> MainLoop<'b> {
         format!(
             "{} intensity={} fps={} flakes={} monitors={} panels={} windows={} snow={:.0} \
              on_windows={:.0} flying={} snowballs={} snowmen={}",
-            if self.paused { "paused" } else { "running" },
+            match (self.paused, self.auto_reasons()) {
+                (true, _) => "paused".to_owned(),
+                (false, None) => "running".to_owned(),
+                (false, Some(why)) => format!("auto-paused({why})"),
+            },
             ipc::intensity_name(self.config.intensity),
             self.config.fps,
             self.world.flakes().len(),
@@ -316,6 +427,17 @@ impl<'b> MainLoop<'b> {
             self.world.snowfolk().balls().len(),
             self.world.snowfolk().snowmen().len()
         )
+    }
+
+    /// The active automatic pause reasons, comma-separated.
+    fn auto_reasons(&self) -> Option<String> {
+        (!self.auto_paused.is_empty()).then(|| {
+            self.auto_paused
+                .iter()
+                .map(|k| k.0)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
     }
 
     fn set_intensity(&mut self, level: Intensity) {
@@ -344,8 +466,9 @@ impl<'b> MainLoop<'b> {
 
     /// Push the current config into the world, the frame pacing and the tray.
     fn apply_config(&mut self) {
-        self.world.set_params(SimParams::from_config(&self.config));
-        self.frame_interval = frame_interval(self.config.fps);
+        let config = effective(&self.config, self.on_battery);
+        self.world.set_params(SimParams::from_config(&config));
+        self.frame_interval = frame_interval(config.fps);
         self.update_tray();
     }
 
@@ -355,14 +478,15 @@ impl<'b> MainLoop<'b> {
         }
     }
 
-    fn set_paused(&mut self, paused: bool) -> Result<()> {
-        if paused == self.paused {
-            return Ok(());
-        }
-        self.paused = paused;
-        log::info!("{}", if paused { "paused" } else { "resumed" });
-        if paused {
-            self.hide()?;
+    /// Show or hide the snow after the user or an automatic reason changed.
+    fn update_visibility(&mut self) -> Result<()> {
+        let show = !self.paused && self.auto_paused.is_empty();
+        if show != self.showing {
+            self.showing = show;
+            log::info!("{}", if show { "snow resumed" } else { "snow paused" });
+            if !show {
+                self.hide()?;
+            }
         }
         self.update_tray();
         Ok(())
@@ -376,6 +500,8 @@ impl<'b> MainLoop<'b> {
             s.scene.draws.clear();
             s.pile_scene.clear = all;
             s.pile_scene.piles.clear();
+            s.pile_scene.draws.clear();
+            s.pile_scene.images.clear();
             let frame = Frame {
                 flakes: &s.scene,
                 piles: &s.pile_scene,

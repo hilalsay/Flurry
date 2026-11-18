@@ -14,6 +14,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 
 use crate::config::Intensity;
+use crate::power::PauseReason;
 
 /// Something the daemon can be asked to do (CLI, tray, hotkey, signals).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +27,11 @@ pub enum Command {
     Reload,
     Status,
     Quit,
+    /// Internal (not accepted over the socket): an automatic pause reason
+    /// started or ended.
+    Auto(PauseReason, bool),
+    /// Internal: the machine woke from sleep.
+    Wake,
 }
 
 impl Command {
@@ -39,6 +45,10 @@ impl Command {
             Command::Reload => "reload".into(),
             Command::Status => "status".into(),
             Command::Quit => "quit".into(),
+            Command::Auto(r, on) => {
+                format!("auto-pause {} {}", r.name(), if *on { "on" } else { "off" })
+            }
+            Command::Wake => "wake".into(),
         }
     }
 

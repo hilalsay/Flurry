@@ -124,6 +124,13 @@ pub trait Backend {
     /// Ids of app windows that exist but are hidden (minimized, other workspace).
     fn hidden_windows(&self) -> &[u64];
 
+    /// Is the focused window fullscreen (a video, a game, a presentation)?
+    fn fullscreen(&self) -> bool;
+
+    /// Re-read monitors, panels and windows (e.g. after waking from sleep).
+    /// Returns the events that produces.
+    fn rescan(&mut self) -> Result<Vec<BackendEvent>>;
+
     /// Where the pointer is and which buttons/modifiers are down, if known.
     fn cursor(&mut self) -> Option<CursorState>;
 
