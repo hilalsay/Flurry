@@ -6,11 +6,12 @@ pub mod particles;
 pub mod piles;
 pub mod snowballs;
 
-use crate::config::Config;
+use crate::config::{CarryModifier, Config};
 use crate::geom::{AppWindow, Inputs, OutputInfo, Rect, WindowRect};
 use flakes::{Flakes, Wind};
 use particles::Particles;
 use piles::{Piles, Z_PANEL};
+use snowballs::{Env, Snowfolk};
 
 /// Screen area that `flake_count` refers to. Bigger or more monitors get
 /// proportionally more flakes so the snow looks equally dense everywhere.
@@ -25,6 +26,9 @@ pub struct SimParams {
     pub wind: f32,
     pub max_pile_height: f32,
     pub melt_rate: f32,
+    /// Snowballs and the cursor (`interaction` in the config).
+    pub interaction: bool,
+    pub carry_modifier: CarryModifier,
 }
 
 impl SimParams {
@@ -35,6 +39,8 @@ impl SimParams {
             wind: c.wind,
             max_pile_height: c.max_pile_height as f32,
             melt_rate: c.melt_rate,
+            interaction: c.interaction,
+            carry_modifier: c.carry_modifier,
         }
     }
 }
@@ -56,6 +62,7 @@ pub struct World {
     screen_area: f64,
     piles: Piles,
     particles: Particles,
+    snowfolk: Snowfolk,
     /// The layout the piles were last synced to.
     layout: Layout,
 }
@@ -92,8 +99,24 @@ impl World {
             screen_area: 0.0,
             piles: Piles::default(),
             particles: Particles::new(seed ^ 0x5DEE_CE66_D1CE_4E5B),
+            snowfolk: Snowfolk::default(),
             layout: Layout::default(),
         }
+    }
+
+    /// Snowballs and snowmen.
+    pub fn snowfolk(&self) -> &Snowfolk {
+        &self.snowfolk
+    }
+
+    /// Global rects where clicks should go to flurry instead of the app
+    /// below (to pick up snowballs). Empty unless the carry modifier is held
+    /// or a ball is being carried.
+    pub fn grab_rects(&self, cursor: Option<&crate::geom::CursorState>) -> Vec<Rect> {
+        if !self.params.interaction {
+            return Vec::new();
+        }
+        self.snowfolk.grab_rects(cursor, self.params.carry_modifier)
     }
 
     /// Snow in flight (knocked or spilled off windows).
@@ -149,6 +172,7 @@ impl World {
     pub fn clear_settled(&mut self) {
         self.piles.clear();
         self.particles.clear();
+        self.snowfolk.clear();
     }
 
     /// Advance the simulation by `dt` seconds.
@@ -179,6 +203,17 @@ impl World {
         });
         self.piles
             .step(dt, self.params.melt_rate, max_h, &mut self.particles);
+        let mut env = Env {
+            dt,
+            now: self.time,
+            cursor: inputs.cursor.filter(|_| self.params.interaction),
+            carry: self.params.carry_modifier,
+            piles: &mut self.piles,
+            particles: &mut self.particles,
+            bounds,
+            max_pile_height: max_h,
+        };
+        self.snowfolk.step(&mut env);
     }
 
     fn sync_piles(&mut self, inputs: &Inputs) {

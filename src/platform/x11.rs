@@ -37,10 +37,10 @@ use x11rb::wrapper::ConnectionExt as _;
 
 use super::{filter_outputs, Backend, BackendEvent, BackendOptions, Frame, Hotkey};
 use crate::config::Layering;
-use crate::geom::{subtract, AppWindow, OutputInfo, Rect, WindowRect};
+use crate::geom::{subtract, AppWindow, CursorState, OutputInfo, Rect, WindowRect};
 use crate::render::{
-    layer_rgb, PileDraw, PileScene, SpriteDraw, SpriteSheet, PILE_FILL, PILE_SHADOW,
-    PILE_SHADOW_OFFSET,
+    copy_rgba_to_bgra, layer_rgb, ImageSheet, PileDraw, PileScene, SpriteDraw, SpriteSheet,
+    PILE_FILL, PILE_SHADOW, PILE_SHADOW_OFFSET,
 };
 use crate::sim::flakes::Layer;
 
@@ -155,6 +155,8 @@ struct Win {
 struct Surface {
     flakes: Win,
     piles: Option<Win>,
+    /// Current input region of the piles window (empty = click-through).
+    input: Vec<Rect>,
 }
 
 /// Server-side drawing resources, created on first present.
@@ -164,6 +166,8 @@ struct Paints {
     layers: [render::Picture; 3],
     pile_fill: render::Picture,
     pile_shadow: render::Picture,
+    /// Uploaded images (snowballs, snowmen) by id: picture, width, height.
+    images: Vec<(render::Picture, u16, u16)>,
 }
 
 /// What a batch of X events asks for.
@@ -392,9 +396,27 @@ impl X11Backend {
             let flakes = self.create_win(rect, managed, "flurry flakes")?;
             let piles = match self.mode {
                 Mode::Desktop => None,
-                _ => Some(self.create_win(rect, false, "flurry piles")?),
+                _ => {
+                    let w = self.create_win(rect, false, "flurry piles")?;
+                    // Clicks on snowballs (when the input region allows them)
+                    // land here instead of in the app below.
+                    self.conn.change_window_attributes(
+                        w.window,
+                        &ChangeWindowAttributesAux::new().event_mask(
+                            EventMask::EXPOSURE
+                                | EventMask::STRUCTURE_NOTIFY
+                                | EventMask::BUTTON_PRESS
+                                | EventMask::BUTTON_RELEASE,
+                        ),
+                    )?;
+                    Some(w)
+                }
             };
-            self.surfaces.push(Surface { flakes, piles });
+            self.surfaces.push(Surface {
+                flakes,
+                piles,
+                input: Vec::new(),
+            });
         }
         self.restack()?;
         self.conn.flush()?;
@@ -1248,7 +1270,52 @@ impl X11Backend {
             layers,
             pile_fill: self.solid(PILE_FILL)?,
             pile_shadow: self.solid(PILE_SHADOW)?,
+            images: Vec::new(),
         })
+    }
+
+    /// Upload images the server doesn't have yet (they never change).
+    fn upload_images(&mut self, sheet: &ImageSheet, drawable: Window) -> Result<()> {
+        let have = self.paints.as_ref().map_or(0, |p| p.images.len());
+        for id in have..sheet.len() {
+            let uploaded = sheet.with(id as u32, |pm| -> Result<(render::Picture, u16, u16)> {
+                let (w, h) = (pm.width() as u16, pm.height() as u16);
+                let pixmap = self.conn.generate_id()?;
+                self.conn.create_pixmap(32, pixmap, drawable, w, h)?;
+                let gc = self.conn.generate_id()?;
+                self.conn
+                    .create_gc(gc, pixmap, &x11rb::protocol::xproto::CreateGCAux::new())?;
+                let mut bgra = vec![0; pm.data().len()];
+                copy_rgba_to_bgra(pm.data(), &mut bgra);
+                self.conn.put_image(
+                    x11rb::protocol::xproto::ImageFormat::Z_PIXMAP,
+                    pixmap,
+                    gc,
+                    w,
+                    h,
+                    0,
+                    0,
+                    0,
+                    32,
+                    &bgra,
+                )?;
+                let picture = self.conn.generate_id()?;
+                self.conn.render_create_picture(
+                    picture,
+                    pixmap,
+                    self.argb_format,
+                    &CreatePictureAux::new(),
+                )?;
+                // The picture keeps the pixmap alive.
+                self.conn.free_gc(gc)?;
+                self.conn.free_pixmap(pixmap)?;
+                Ok((picture, w, h))
+            });
+            if let (Some(p), Some(img)) = (self.paints.as_mut(), uploaded) {
+                p.images.push(img?);
+            }
+        }
+        Ok(())
     }
 
     /// A solid-fill picture of straight (non-premultiplied) RGBA.
@@ -1383,14 +1450,35 @@ impl X11Backend {
                 }
             }
         }
-        // Flying snow goes on top of everything.
+        // Flying snow, snowballs and snowmen go on top of everything.
+        if clipped {
+            self.set_rects(&scene.clear);
+            self.conn
+                .render_set_picture_clip_rectangles(picture, 0, 0, &self.rects)?;
+        }
         if !scene.draws.is_empty() {
-            if clipped {
-                self.set_rects(&scene.clear);
-                self.conn
-                    .render_set_picture_clip_rectangles(picture, 0, 0, &self.rects)?;
-            }
             self.draw_sprites(picture, &scene.draws, sheet)?;
+        }
+        if let Some(paints) = &self.paints {
+            for d in &scene.images {
+                let Some(&(src, w, h)) = paints.images.get(d.image as usize) else {
+                    continue;
+                };
+                self.conn.render_composite(
+                    PictOp::OVER,
+                    src,
+                    x11rb::NONE,
+                    picture,
+                    0,
+                    0,
+                    0,
+                    0,
+                    d.x as i16,
+                    d.y as i16,
+                    w,
+                    h,
+                )?;
+            }
         }
         self.conn
             .render_change_picture(picture, &ChangePictureAux::new().clipmask(x11rb::NONE))?;
@@ -1438,6 +1526,45 @@ impl Backend for X11Backend {
         &self.hidden
     }
 
+    fn cursor(&mut self) -> Option<CursorState> {
+        let reply = self.conn.query_pointer(self.root).ok()?.reply().ok()?;
+        let mask = u16::from(reply.mask);
+        let has = |m: x11rb::protocol::xproto::KeyButMask| mask & u16::from(m) != 0;
+        use x11rb::protocol::xproto::KeyButMask;
+        Some(CursorState {
+            x: f32::from(reply.root_x),
+            y: f32::from(reply.root_y),
+            left_down: has(KeyButMask::BUTTON1),
+            alt: has(KeyButMask::MOD1),
+            super_: has(KeyButMask::MOD4),
+        })
+    }
+
+    fn set_input_region(&mut self, output: usize, rects: &[Rect]) -> Result<()> {
+        let Some(s) = self.surfaces.get_mut(output) else {
+            return Ok(());
+        };
+        let Some(piles) = s.piles else {
+            return Ok(());
+        };
+        if s.input == rects {
+            return Ok(());
+        }
+        s.input = rects.to_vec();
+        let x_rects: Vec<Rectangle> = rects.iter().map(to_x_rect).collect();
+        self.conn.shape_rectangles(
+            shape::SO::SET,
+            shape::SK::INPUT,
+            ClipOrdering::UNSORTED,
+            piles.window,
+            0,
+            0,
+            &x_rects,
+        )?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
     fn present(&mut self, output: usize, frame: &Frame) -> Result<()> {
         if self.paints.is_none() {
             self.paints = Some(self.create_paints(frame.sprites)?);
@@ -1447,6 +1574,9 @@ impl Backend for X11Backend {
             .get(output)
             .context("present: no such output")?;
         let (flakes, piles) = (s.flakes.picture, s.piles.map(|p| p.picture));
+        if !frame.piles.images.is_empty() {
+            self.upload_images(frame.images, s.flakes.window)?;
+        }
         if !frame.flakes.clear.is_empty() || !frame.flakes.draws.is_empty() {
             self.clear(flakes, &frame.flakes.clear)?;
             let masked = self.mode == Mode::Mask;
@@ -1536,7 +1666,13 @@ impl Drop for X11Backend {
     fn drop(&mut self) {
         if let Some(p) = self.paints.take() {
             let _ = self.conn.render_free_glyph_set(p.glyphs);
-            for pic in p.layers.into_iter().chain([p.pile_fill, p.pile_shadow]) {
+            let images = p.images.iter().map(|i| i.0);
+            for pic in p
+                .layers
+                .into_iter()
+                .chain([p.pile_fill, p.pile_shadow])
+                .chain(images)
+            {
                 let _ = self.conn.render_free_picture(pic);
             }
         }

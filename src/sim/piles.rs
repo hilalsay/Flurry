@@ -95,6 +95,11 @@ impl Surface {
         self.heights.iter().copied().fold(0.0, f32::max)
     }
 
+    /// Top of the snow at global `x`, if `x` is over this surface.
+    pub fn top_at(&self, x: f32) -> Option<f32> {
+        self.col(x).map(|c| self.y - self.heights[c])
+    }
+
     fn col(&self, x: f32) -> Option<usize> {
         let c = ((x - self.x0) / COL_W).floor();
         (c >= 0.0 && (c as usize) < self.heights.len()).then_some(c as usize)
@@ -246,11 +251,72 @@ struct Parked {
 pub struct Piles {
     surfaces: Vec<Surface>,
     parked: HashMap<u64, Parked>,
+    /// Window piles thrown off in the last `sync`, with the window's velocity.
+    knocked: Vec<(SurfaceKey, (f32, f32))>,
 }
 
 impl Piles {
     pub fn surfaces(&self) -> &[Surface] {
         &self.surfaces
+    }
+
+    pub fn surface(&self, key: &SurfaceKey) -> Option<&Surface> {
+        self.surfaces.iter().find(|s| &s.key == key)
+    }
+
+    /// Windows that moved fast enough to throw their snow in the last sync.
+    pub fn knocked(&self) -> &[(SurfaceKey, (f32, f32))] {
+        &self.knocked
+    }
+
+    /// The first surface something at `x` meets falling from `prev_bottom`
+    /// to `bottom` (its lowest point), and the snow top there.
+    pub fn landing(&self, x: f32, prev_bottom: f32, bottom: f32) -> Option<(SurfaceKey, f32)> {
+        self.hit(x, prev_bottom, bottom)
+            .map(|(i, top)| (self.surfaces[i].key.clone(), top))
+    }
+
+    fn hit(&self, x: f32, prev_bottom: f32, bottom: f32) -> Option<(usize, f32)> {
+        let mut hit: Option<(usize, f32)> = None;
+        for (i, s) in self.surfaces.iter().enumerate() {
+            let Some(top) = s.top_at(x) else { continue };
+            if prev_bottom <= top + 0.5 && bottom >= top && hit.is_none_or(|(_, t)| top < t) {
+                hit = Some((i, top));
+            }
+        }
+        hit
+    }
+
+    /// The surface whose snow `(x, y)` is in (or just above), if the snow
+    /// there is at least `min_depth` px deep.
+    pub fn snow_at(&self, x: f32, y: f32, min_depth: f32) -> Option<(SurfaceKey, f32)> {
+        self.surfaces.iter().find_map(|s| {
+            let c = s.col(x)?;
+            let top = s.y - s.heights[c];
+            (s.heights[c] >= min_depth && y >= top - 3.0 && y <= s.y + 2.0)
+                .then(|| (s.key.clone(), top))
+        })
+    }
+
+    /// Remove up to `depth` px of snow from the columns of `key` within
+    /// `x ± half_width`. Returns the volume taken (px²).
+    pub fn take(&mut self, key: &SurfaceKey, x: f32, half_width: f32, depth: f32) -> f32 {
+        let Some(s) = self.surfaces.iter_mut().find(|s| &s.key == key) else {
+            return 0.0;
+        };
+        let (Some(c0), Some(c1)) = (
+            s.col((x - half_width).max(s.x0)),
+            s.col((x + half_width).min(s.x1() - 0.01)),
+        ) else {
+            return 0.0;
+        };
+        let mut taken = 0.0;
+        for h in &mut s.heights[c0..=c1] {
+            let t = h.min(depth);
+            *h -= t;
+            taken += t * COL_W;
+        }
+        taken
     }
 
     /// Total snow on all visible surfaces (px²).
@@ -288,9 +354,10 @@ impl Piles {
             .drain(..)
             .map(|s| (s.key.clone(), s))
             .collect();
+        self.knocked.clear();
         for spec in specs(inputs, max_height) {
             let surface = match old.remove(&spec.key) {
-                Some(s) => self.follow(s, &spec, now, particles),
+                Some(s) => follow(s, &spec, now, particles, &mut self.knocked),
                 None => self.unpark(&spec, now, max_height, melt_rate),
             };
             self.surfaces.push(surface);
@@ -313,27 +380,6 @@ impl Piles {
         // Forget parked piles of windows that no longer exist at all.
         let alive = |id: &u64| inputs.hidden_windows.contains(id);
         self.parked.retain(|id, _| alive(id));
-    }
-
-    fn follow(&self, mut s: Surface, spec: &Spec, now: f64, particles: &mut Particles) -> Surface {
-        if (s.x0, s.x1(), s.y, s.z) == (spec.x0, spec.x1, spec.y, spec.z) {
-            return s;
-        }
-        if !s.key.spills() {
-            s.refit_in_place(spec);
-            return s;
-        }
-        let moved = (spec.x0 - s.x0, spec.y - s.y);
-        if moved != (0.0, 0.0) {
-            let dt = ((now - s.moved_at) as f32).max(1.0 / 60.0);
-            let v = (moved.0 / dt, moved.1 / dt);
-            if v.0.hypot(v.1) > KNOCK_SPEED {
-                s.shatter((v.0 * KNOCK_CARRY, v.1 * KNOCK_CARRY), particles);
-            }
-            s.moved_at = now;
-        }
-        s.refit_with_window(spec);
-        s
     }
 
     fn unpark(&mut self, spec: &Spec, now: f64, max_height: f32, melt_rate: f32) -> Surface {
@@ -360,17 +406,10 @@ impl Piles {
 
     /// Like [`try_land`](Self::try_land) with an explicit snow `volume` (px²).
     pub fn land(&mut self, x: f32, y_prev: f32, y: f32, r: f32, volume: f32, max_h: f32) -> bool {
-        let (prev_bottom, bottom) = (y_prev + r, y + r);
         // The first surface met on the way down.
-        let mut hit: Option<(usize, f32)> = None;
-        for (i, s) in self.surfaces.iter().enumerate() {
-            let Some(c) = s.col(x) else { continue };
-            let top = s.y - s.heights[c];
-            if prev_bottom <= top + 0.5 && bottom >= top && hit.is_none_or(|(_, t)| top < t) {
-                hit = Some((i, top));
-            }
-        }
-        let Some((i, _)) = hit else { return false };
+        let Some((i, _)) = self.hit(x, y_prev + r, y + r) else {
+            return false;
+        };
         let s = &mut self.surfaces[i];
         let reach = r * SPREAD;
         let (Some(c0), Some(c1)) = (
@@ -401,6 +440,36 @@ impl Piles {
             s.melt(dt, melt_rate, max_height);
         }
     }
+}
+
+/// Follow a surface that still exists to its new place (see `Piles::sync`).
+fn follow(
+    mut s: Surface,
+    spec: &Spec,
+    now: f64,
+    particles: &mut Particles,
+    knocked: &mut Vec<(SurfaceKey, (f32, f32))>,
+) -> Surface {
+    if (s.x0, s.x1(), s.y, s.z) == (spec.x0, spec.x1, spec.y, spec.z) {
+        return s;
+    }
+    if !s.key.spills() {
+        s.refit_in_place(spec);
+        return s;
+    }
+    let moved = (spec.x0 - s.x0, spec.y - s.y);
+    if moved != (0.0, 0.0) {
+        let dt = ((now - s.moved_at) as f32).max(1.0 / 60.0);
+        let v = (moved.0 / dt, moved.1 / dt);
+        if v.0.hypot(v.1) > KNOCK_SPEED {
+            let thrown = (v.0 * KNOCK_CARRY, v.1 * KNOCK_CARRY);
+            s.shatter(thrown, particles);
+            knocked.push((s.key.clone(), thrown));
+        }
+        s.moved_at = now;
+    }
+    s.refit_with_window(spec);
+    s
 }
 
 /// Surfaces for the current layout:

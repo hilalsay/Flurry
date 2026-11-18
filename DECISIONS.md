@@ -135,3 +135,26 @@ decided and why.
   1.7–1.8%, Xorg 7.5–7.7%; cinnamon ≤ 1% for both. The Phase 4 table's lower Xorg figure (4.6%) was
   taken under different desktop conditions. Today's total is about 9% of a core, under the 12% budget.
 - **Phase 5:** the KWin, Hyprland and Sway window providers stay in Phase 9 with the rest of Wayland.
+- **Phase 6: carrying vs Cinnamon's Alt+drag.** Cinnamon's `mouse-button-modifier` is `<Alt>`, so an
+  Alt+click that reaches a window would start moving it. While the carry modifier is held (or a ball
+  is carried), flurry sets the input shape of its top window to exactly the snowballs' rects (+3 px).
+  An Alt+click on a snowball therefore lands on flurry's override-redirect window, so Muffin's
+  passive Alt grab on app frames never fires and the app below sees nothing. Everywhere else clicks
+  still pass through. **So `carry_modifier` stays `"alt"`;** `super` and `none` work the same way.
+  Cursor position, button and modifiers come from `QueryPointer` once per frame.
+- **Phase 6: snowballs.** Sweeping the cursor sideways (> 40 px/s) through ≥ 2 px of snow scoops a
+  ball (≥ 10 px²) and pushes it ahead of the pointer. Rolling picks up 0.06 px of snow height per px
+  rolled from under the ball (radius 2.5–42 px, at most 24 balls). Balls roll with friction, ride
+  along on slowly moved windows, are thrown with a fast-dragged window, fall off edges, push each
+  other sideways, and rest on top of each other (sliding off if more than 45% of the lower ball's
+  radius off-centre). Falling more than 160 px poofs a ball into the pile below with a small puff of
+  particles. Releasing a carried ball drops it, or throws it with the pointer's velocity.
+- **Phase 6: snowman.** Three balls stacked bottom → top, each ≥ 1.1× the radius of the one above and
+  all at rest for 0.4 s, become a snowman drawn in code (shaded balls, coal eyes and buttons, carrot
+  nose, red scarf, stick arms). It rides along with its window. If the window is flung it breaks back
+  into three balls that fly off, and if its surface disappears the balls fall.
+- **Phase 6: drawing.** Snowballs and snowmen are full-colour images (tiny-skia), made once per
+  quantised size (balls in ½ px steps, snowmen per whole-px radii) and uploaded once as XRender ARGB
+  pictures. They are composited on the top window and only redrawn when they move or when something
+  else clears their area. They are drawn in front of everything (not clipped by windows above them).
+- **Phase 6:** Wayland play mode stays in Phase 9.

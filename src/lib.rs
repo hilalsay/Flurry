@@ -1,6 +1,7 @@
 //! flurry — desktop snow for Linux. See PLAN.md for the architecture.
 
 pub mod app;
+pub mod art;
 pub mod cli;
 pub mod config;
 pub mod geom;

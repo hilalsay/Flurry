@@ -225,11 +225,17 @@ impl<'b> MainLoop<'b> {
             }
             acc = (acc + (now - last)).min(MAX_CATCH_UP);
             last = now;
+            self.inputs.cursor = if self.config.interaction {
+                self.backend.cursor()
+            } else {
+                None
+            };
             while acc >= STEP {
                 self.world.step(STEP.as_secs_f32(), &self.inputs);
                 acc -= STEP;
             }
             self.draw()?;
+            self.update_grab_regions()?;
             self.record(now);
             next_frame += self.frame_interval;
             if next_frame < now {
@@ -289,7 +295,7 @@ impl<'b> MainLoop<'b> {
     fn status(&self) -> String {
         format!(
             "{} intensity={} fps={} flakes={} monitors={} panels={} windows={} snow={:.0} \
-             on_windows={:.0} flying={}",
+             on_windows={:.0} flying={} snowballs={} snowmen={}",
             if self.paused { "paused" } else { "running" },
             ipc::intensity_name(self.config.intensity),
             self.config.fps,
@@ -306,7 +312,9 @@ impl<'b> MainLoop<'b> {
                 .map(|s| s.volume())
                 .sum::<f32>()
                 .max(0.0),
-            self.world.particles().len()
+            self.world.particles().len(),
+            self.world.snowfolk().balls().len(),
+            self.world.snowfolk().snowmen().len()
         )
     }
 
@@ -372,6 +380,7 @@ impl<'b> MainLoop<'b> {
                 flakes: &s.scene,
                 piles: &s.pile_scene,
                 sprites: self.renderer.sprites(),
+                images: self.renderer.images(),
             };
             self.backend.present(i, &frame)?;
             s.invalidate();
@@ -389,6 +398,7 @@ impl<'b> MainLoop<'b> {
                 flakes: &s.scene,
                 piles: &s.pile_scene,
                 sprites: self.renderer.sprites(),
+                images: self.renderer.images(),
             };
             self.backend.present(i, &frame)?;
         }
@@ -398,6 +408,21 @@ impl<'b> MainLoop<'b> {
     fn windows_changed(&mut self) {
         self.inputs.windows = self.backend.windows().to_vec();
         self.inputs.hidden_windows = self.backend.hidden_windows().to_vec();
+    }
+
+    /// Let clicks on snowballs reach flurry (to pick them up) while the
+    /// carry modifier is held; everywhere else stays click-through.
+    fn update_grab_regions(&mut self) -> Result<()> {
+        let grab = self.world.grab_rects(self.inputs.cursor.as_ref());
+        for (i, s) in self.surfaces.iter().enumerate() {
+            let local: Vec<Rect> = grab
+                .iter()
+                .map(|r| Rect::new(r.x - s.rect.x, r.y - s.rect.y, r.w, r.h))
+                .filter_map(|r| r.intersect(&Rect::new(0, 0, s.rect.w, s.rect.h)))
+                .collect();
+            self.backend.set_input_region(i, &local)?;
+        }
+        Ok(())
     }
 
     fn outputs_changed(&mut self) {

@@ -71,13 +71,14 @@ pub struct AppWindow {
     pub collects: bool,
 }
 
+/// The mouse pointer, global coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct CursorState {
     pub x: f32,
     pub y: f32,
     pub left_down: bool,
-    /// True while the configured carry modifier (e.g. Alt) is held.
-    pub modifier_down: bool,
+    pub alt: bool,
+    pub super_: bool,
 }
 
 /// Everything the simulation learns about the outside world each frame.

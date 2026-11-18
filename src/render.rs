@@ -7,6 +7,7 @@
 //!
 //! Sprites are pre-rendered soft discs: quantised radius × 4×4 subpixel offsets.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Transform};
@@ -165,6 +166,7 @@ pub struct Scene {
 
 pub struct Renderer {
     sheet: SpriteSheet,
+    images: ImageSheet,
 }
 
 impl Default for Renderer {
@@ -177,11 +179,16 @@ impl Renderer {
     pub fn new() -> Self {
         Self {
             sheet: SpriteSheet::new(),
+            images: ImageSheet::default(),
         }
     }
 
     pub fn sprites(&self) -> &SpriteSheet {
         &self.sheet
+    }
+
+    pub fn images(&self) -> &ImageSheet {
+        &self.images
     }
 
     /// Build the next frame for the output at `output` (global coordinates).
@@ -295,12 +302,80 @@ impl PileDraw {
 }
 
 /// One output's top-layer changes: clear `clear`, then draw `piles` (each
-/// clipped to `clear` minus its holes), then the flying snow `draws`.
+/// clipped to `clear` minus its holes), the flying snow `draws`, and the
+/// `images` (snowballs, snowmen), all clipped to `clear`.
 #[derive(Debug, Clone, Default)]
 pub struct PileScene {
     pub clear: Vec<Rect>,
     pub piles: Vec<PileDraw>,
     pub draws: Vec<SpriteDraw>,
+    pub images: Vec<ImageDraw>,
+}
+
+/// Draw image `image` of the [`ImageSheet`] with its top-left at (`x`, `y`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageDraw {
+    pub image: u32,
+    pub x: i32,
+    pub y: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ImageKey {
+    /// Radius in half pixels.
+    Ball(u16),
+    /// Radii in whole pixels.
+    Snowman([u16; 3]),
+}
+
+struct Image {
+    pixmap: Pixmap,
+    anchor: (i32, i32),
+}
+
+/// Full-colour images, created on first use and never changed, so backends
+/// can upload each id once. Ids are dense: 0..len().
+#[derive(Default)]
+pub struct ImageSheet {
+    images: RefCell<Vec<Image>>,
+    index: RefCell<HashMap<ImageKey, u32>>,
+}
+
+impl ImageSheet {
+    pub fn len(&self) -> usize {
+        self.images.borrow().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Run `f` with image `id` (premultiplied RGBA).
+    pub fn with<R>(&self, id: u32, f: impl FnOnce(&Pixmap) -> R) -> Option<R> {
+        self.images.borrow().get(id as usize).map(|i| f(&i.pixmap))
+    }
+
+    /// The image for `key`, its size and anchor.
+    fn get(&self, key: ImageKey) -> Option<(u32, u32, u32, (i32, i32))> {
+        let known = self.index.borrow().get(&key).copied();
+        let id = match known {
+            Some(id) => id,
+            None => {
+                let (pixmap, anchor) = match key {
+                    ImageKey::Ball(half) => crate::art::snowball(f32::from(half) / 2.0)?,
+                    ImageKey::Snowman(r) => crate::art::snowman(r.map(f32::from))?,
+                };
+                let mut images = self.images.borrow_mut();
+                images.push(Image { pixmap, anchor });
+                let id = (images.len() - 1) as u32;
+                self.index.borrow_mut().insert(key, id);
+                id
+            }
+        };
+        let images = self.images.borrow();
+        let img = images.get(id as usize)?;
+        Some((id, img.pixmap.width(), img.pixmap.height(), img.anchor))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -320,6 +395,8 @@ pub struct PileTracker {
     full: bool,
     /// Flying snow, tracked like flakes.
     particles: Damage,
+    /// Images on screen last frame, with their output-local rects.
+    images: Vec<(ImageDraw, Rect)>,
 }
 
 impl Default for PileTracker {
@@ -328,6 +405,7 @@ impl Default for PileTracker {
             drawn: HashMap::new(),
             full: false,
             particles: Damage::new(0, 0),
+            images: Vec::new(),
         }
     }
 }
@@ -337,6 +415,7 @@ impl PileTracker {
     pub fn invalidate(&mut self) {
         self.full = true;
         self.drawn.clear();
+        self.images.clear();
     }
 }
 
@@ -445,7 +524,53 @@ impl Renderer {
             keep
         });
         self.particle_draws(world, output, &mut tracker.particles, scene);
+        self.image_draws(world, output, tracker, scene);
         self.pile_draws(world, output, scene);
+    }
+
+    /// Snowballs and snowmen. Only when the set of images or their places
+    /// change are their old and new rects cleared; otherwise they stay as
+    /// drawn (and are redrawn only where something else cleared them).
+    fn image_draws(
+        &self,
+        world: &World,
+        output: Rect,
+        tracker: &mut PileTracker,
+        scene: &mut PileScene,
+    ) {
+        scene.images.clear();
+        let mut now: Vec<(ImageDraw, Rect)> = Vec::new();
+        let mut add = |key, x: f32, y: f32| {
+            let Some((image, w, h, (ax, ay))) = self.images.get(key) else {
+                return;
+            };
+            let draw = ImageDraw {
+                image,
+                x: x.round() as i32 - output.x - ax,
+                y: y.round() as i32 - output.y - ay,
+            };
+            let rect = Rect::new(draw.x, draw.y, w, h);
+            if clip_to(rect, output.w, output.h).is_some() {
+                now.push((draw, rect));
+            }
+        };
+        let folk = world.snowfolk();
+        for m in folk.snowmen() {
+            let r = m.radii.map(|r| r.round() as u16);
+            add(ImageKey::Snowman(r), m.x, m.base);
+        }
+        for b in folk.balls() {
+            let half = (b.radius() * 2.0).round() as u16;
+            add(ImageKey::Ball(half), b.x, b.y);
+        }
+        if now != tracker.images {
+            let (w, h) = (output.w, output.h);
+            for (_, r) in tracker.images.iter().chain(&now) {
+                scene.clear.extend(clip_to(*r, w, h));
+            }
+        }
+        scene.images.extend(now.iter().map(|(d, _)| *d));
+        tracker.images = now;
     }
 
     /// Flying snow as near-layer sprites; their damage joins `scene.clear`.
@@ -543,6 +668,22 @@ impl Renderer {
         };
         for d in &scene.draws {
             target.blit(self.sheet.get(d.sprite), d.x, d.y);
+        }
+        if scene.images.is_empty() {
+            return;
+        }
+        let clip = clip_mask(&scene.clear, pw, ph);
+        for d in &scene.images {
+            self.images.with(d.image, |img| {
+                pixmap.draw_pixmap(
+                    d.x,
+                    d.y,
+                    img.as_ref(),
+                    &tiny_skia::PixmapPaint::default(),
+                    Transform::identity(),
+                    clip.as_ref(),
+                );
+            });
         }
     }
 }

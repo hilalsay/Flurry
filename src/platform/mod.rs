@@ -10,8 +10,8 @@ pub mod x11;
 use std::time::Duration;
 
 use crate::config::{Layering, Monitors};
-use crate::geom::{AppWindow, OutputInfo, WindowRect};
-use crate::render::{PileScene, Scene, SpriteSheet};
+use crate::geom::{AppWindow, CursorState, OutputInfo, Rect, WindowRect};
+use crate::render::{ImageSheet, PileScene, Scene, SpriteSheet};
 use anyhow::{bail, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -42,6 +42,7 @@ pub struct Frame<'a> {
     /// Settled snow, drawn on top of everything.
     pub piles: &'a PileScene,
     pub sprites: &'a SpriteSheet,
+    pub images: &'a ImageSheet,
 }
 
 /// A global key combination such as `super+shift+s`.
@@ -122,6 +123,13 @@ pub trait Backend {
 
     /// Ids of app windows that exist but are hidden (minimized, other workspace).
     fn hidden_windows(&self) -> &[u64];
+
+    /// Where the pointer is and which buttons/modifiers are down, if known.
+    fn cursor(&mut self) -> Option<CursorState>;
+
+    /// Catch clicks (instead of passing them through) inside `rects`
+    /// (output-local) on output `output`'s top window. Empty = click-through.
+    fn set_input_region(&mut self, output: usize, rects: &[Rect]) -> Result<()>;
 
     /// Show the next frame on output `output`. Scenes are incremental: they
     /// clear and redraw only what changed since the previous frame for this
