@@ -264,6 +264,41 @@ pub const PILE_FILL: [u8; 4] = [246, 249, 255, 255];
 pub const PILE_SHADOW: [u8; 4] = [95, 115, 155, 120];
 /// How far the shadow outline is shifted down (px).
 pub const PILE_SHADOW_OFFSET: f32 = 1.5;
+/// Icicles: translucent pale blue with a white glint.
+pub const ICE_FILL: [u8; 4] = [205, 226, 248, 215];
+pub const ICE_SHINE: [u8; 4] = [255, 255, 255, 210];
+
+/// Three points.
+pub type Triangle = [(f32, f32); 3];
+
+/// An icicle hanging from (`x`, `y`), output-local, `w` wide at the top.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IcicleDraw {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub length: f32,
+    /// Windows/panels stacked above what it hangs from.
+    pub holes: Vec<Rect>,
+}
+
+impl IcicleDraw {
+    /// The body and the glint, as triangles.
+    pub fn triangles(&self) -> [(Triangle, [u8; 4]); 2] {
+        let (x, y, h, l) = (self.x, self.y, self.w / 2.0, self.length);
+        [
+            ([(x - h, y), (x + h, y), (x, y + l)], ICE_FILL),
+            (
+                [
+                    (x - h * 0.6, y),
+                    (x - h * 0.15, y),
+                    (x - h * 0.05, y + l * 0.8),
+                ],
+                ICE_SHINE,
+            ),
+        ]
+    }
+}
 /// Redraw a column once its height changed by this much (px).
 const PILE_REDRAW_STEP: f32 = 0.25;
 /// Extra space around a pile that its drawing may touch (shadow, AA).
@@ -310,6 +345,7 @@ pub struct PileScene {
     pub piles: Vec<PileDraw>,
     pub draws: Vec<SpriteDraw>,
     pub images: Vec<ImageDraw>,
+    pub icicles: Vec<IcicleDraw>,
 }
 
 /// Draw image `image` of the [`ImageSheet`] with its top-left at (`x`, `y`).
@@ -397,6 +433,8 @@ pub struct PileTracker {
     particles: Damage,
     /// Images on screen last frame, with their output-local rects.
     images: Vec<(ImageDraw, Rect)>,
+    /// Icicles on screen: id → (rounded shape, output-local rect).
+    icicles: HashMap<u64, ((i32, i32, i32), Rect)>,
 }
 
 impl Default for PileTracker {
@@ -406,6 +444,7 @@ impl Default for PileTracker {
             full: false,
             particles: Damage::new(0, 0),
             images: Vec::new(),
+            icicles: HashMap::new(),
         }
     }
 }
@@ -416,6 +455,7 @@ impl PileTracker {
         self.full = true;
         self.drawn.clear();
         self.images.clear();
+        self.icicles.clear();
     }
 }
 
@@ -525,7 +565,68 @@ impl Renderer {
         });
         self.particle_draws(world, output, &mut tracker.particles, scene);
         self.image_draws(world, output, tracker, scene);
+        self.icicle_draws(world, output, tracker, scene);
         self.pile_draws(world, output, scene);
+    }
+
+    /// Icicles; an icicle's rect is cleared when it appears, changes (in
+    /// whole px) or goes away.
+    fn icicle_draws(
+        &self,
+        world: &World,
+        output: Rect,
+        tracker: &mut PileTracker,
+        scene: &mut PileScene,
+    ) {
+        scene.icicles.clear();
+        let (w, h) = (output.w, output.h);
+        let mut seen = HashSet::new();
+        for ice in world.icicles() {
+            let (x, y) = (ice.x - output.x as f32, ice.y - output.y as f32);
+            let rect = Rect::new(
+                (x - ice.width / 2.0).floor() as i32 - 1,
+                y.floor() as i32 - 1,
+                ice.width.ceil() as u32 + 3,
+                ice.length.ceil() as u32 + 3,
+            );
+            if clip_to(rect, w, h).is_none() {
+                continue;
+            }
+            seen.insert(ice.id);
+            let shape = (
+                x.round() as i32,
+                y.round() as i32,
+                ice.length.round() as i32,
+            );
+            match tracker.icicles.insert(ice.id, (shape, rect)) {
+                Some((old, _)) if old == shape => {}
+                Some((_, old_rect)) => {
+                    scene.clear.extend(clip_to(old_rect, w, h));
+                    scene.clear.extend(clip_to(rect, w, h));
+                }
+                None => scene.clear.extend(clip_to(rect, w, h)),
+            }
+            let holes = world
+                .occluders()
+                .filter(|(z, _)| *z > ice.z)
+                .map(|(_, r)| Rect::new(r.x - output.x, r.y - output.y, r.w, r.h))
+                .filter_map(|r| r.intersect(&rect))
+                .collect();
+            scene.icicles.push(IcicleDraw {
+                x,
+                y,
+                w: ice.width,
+                length: ice.length,
+                holes,
+            });
+        }
+        tracker.icicles.retain(|id, (_, r)| {
+            let keep = seen.contains(id);
+            if !keep {
+                scene.clear.extend(clip_to(*r, w, h));
+            }
+            keep
+        });
     }
 
     /// Snowballs and snowmen. Only when the set of images or their places
@@ -650,6 +751,26 @@ impl Renderer {
                 let Some(path) = pile_path(draw, dy) else {
                     continue;
                 };
+                let mut paint = Paint::default();
+                paint.set_color_rgba8(rgba[0], rgba[1], rgba[2], rgba[3]);
+                pixmap.fill_path(
+                    &path,
+                    &paint,
+                    FillRule::Winding,
+                    Transform::identity(),
+                    clip.as_ref(),
+                );
+            }
+        }
+        for ice in &scene.icicles {
+            let clip = clip_mask(&subtract(&scene.clear, &ice.holes), pw, ph);
+            for (tri, rgba) in ice.triangles() {
+                let mut pb = PathBuilder::new();
+                pb.move_to(tri[0].0, tri[0].1);
+                pb.line_to(tri[1].0, tri[1].1);
+                pb.line_to(tri[2].0, tri[2].1);
+                pb.close();
+                let Some(path) = pb.finish() else { continue };
                 let mut paint = Paint::default();
                 paint.set_color_rgba8(rgba[0], rgba[1], rgba[2], rgba[3]);
                 pixmap.fill_path(

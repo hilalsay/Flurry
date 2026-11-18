@@ -2,6 +2,7 @@
 //! Must not import from `platform`, `tray` or `ipc` (PLAN.md §4).
 
 pub mod flakes;
+pub mod icicles;
 pub mod particles;
 pub mod piles;
 pub mod snowballs;
@@ -31,6 +32,8 @@ pub struct SimParams {
     pub carry_modifier: CarryModifier,
     /// Feature: busy windows melt their snow faster.
     pub hot_apps_melt: bool,
+    /// Feature: icicles on snowy windows and panels.
+    pub icicles: bool,
 }
 
 impl SimParams {
@@ -44,6 +47,7 @@ impl SimParams {
             interaction: c.interaction,
             carry_modifier: c.carry_modifier,
             hot_apps_melt: c.features.hot_apps_melt,
+            icicles: c.features.icicles,
         }
     }
 }
@@ -66,6 +70,7 @@ pub struct World {
     piles: Piles,
     particles: Particles,
     snowfolk: Snowfolk,
+    icicles: icicles::Icicles,
     /// The layout the piles were last synced to.
     layout: Layout,
 }
@@ -103,7 +108,17 @@ impl World {
             piles: Piles::default(),
             particles: Particles::new(seed ^ 0x5DEE_CE66_D1CE_4E5B),
             snowfolk: Snowfolk::default(),
+            icicles: icicles::Icicles::default(),
             layout: Layout::default(),
+        }
+    }
+
+    /// Hanging and falling icicles.
+    pub fn icicles(&self) -> Vec<icicles::Icicle> {
+        if self.params.icicles {
+            self.icicles.all()
+        } else {
+            Vec::new()
         }
     }
 
@@ -176,6 +191,7 @@ impl World {
         self.piles.clear();
         self.particles.clear();
         self.snowfolk.clear();
+        self.icicles.clear();
     }
 
     /// Advance the simulation by `dt` seconds.
@@ -223,6 +239,10 @@ impl World {
             max_pile_height: max_h,
         };
         self.snowfolk.step(&mut env);
+        if self.params.icicles {
+            self.icicles
+                .step(dt, inputs, &mut self.piles, &mut self.particles, bounds);
+        }
     }
 
     fn sync_piles(&mut self, inputs: &Inputs) {

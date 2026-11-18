@@ -79,12 +79,15 @@ impl Monitors {
 pub struct Features {
     /// Windows whose programs use a lot of CPU melt their snow faster.
     pub hot_apps_melt: bool,
+    /// Icicles grow under snowy windows and on the panel.
+    pub icicles: bool,
 }
 
 impl Default for Features {
     fn default() -> Self {
         Self {
             hot_apps_melt: true,
+            icicles: true,
         }
     }
 }

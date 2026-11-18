@@ -40,7 +40,7 @@ use crate::config::Layering;
 use crate::geom::{subtract, AppWindow, CursorState, OutputInfo, Rect, WindowRect};
 use crate::render::{
     copy_rgba_to_bgra, layer_rgb, ImageSheet, PileDraw, PileScene, SpriteDraw, SpriteSheet,
-    PILE_FILL, PILE_SHADOW, PILE_SHADOW_OFFSET,
+    ICE_FILL, ICE_SHINE, PILE_FILL, PILE_SHADOW, PILE_SHADOW_OFFSET,
 };
 use crate::sim::flakes::Layer;
 
@@ -169,6 +169,8 @@ struct Paints {
     layers: [render::Picture; 3],
     pile_fill: render::Picture,
     pile_shadow: render::Picture,
+    ice_fill: render::Picture,
+    ice_shine: render::Picture,
     /// Uploaded images (snowballs, snowmen) by id: picture, width, height.
     images: Vec<(render::Picture, u16, u16)>,
 }
@@ -1300,6 +1302,8 @@ impl X11Backend {
             layers,
             pile_fill: self.solid(PILE_FILL)?,
             pile_shadow: self.solid(PILE_SHADOW)?,
+            ice_fill: self.solid(ICE_FILL)?,
+            ice_shine: self.solid(ICE_SHINE)?,
             images: Vec::new(),
         })
     }
@@ -1478,6 +1482,39 @@ impl X11Backend {
                     )?;
                     start = end - 2;
                 }
+            }
+        }
+        // Icicles, clipped by whatever is stacked above what they hang from.
+        let ice = self.paints.as_ref().map(|p| (p.ice_fill, p.ice_shine));
+        for icicle in &scene.icicles {
+            let Some((fill, shine)) = ice else { break };
+            let open = subtract(&scene.clear, &icicle.holes);
+            if open.is_empty() {
+                continue;
+            }
+            self.set_rects(&open);
+            self.conn
+                .render_set_picture_clip_rectangles(picture, 0, 0, &self.rects)?;
+            clipped = true;
+            for ((tri, _), src) in icicle.triangles().into_iter().zip([fill, shine]) {
+                let p = |(x, y): (f32, f32)| Pointfix {
+                    x: fixed(x),
+                    y: fixed(y),
+                };
+                let t = render::Triangle {
+                    p1: p(tri[0]),
+                    p2: p(tri[1]),
+                    p3: p(tri[2]),
+                };
+                self.conn.render_triangles(
+                    PictOp::OVER,
+                    src,
+                    picture,
+                    self.a8_format,
+                    0,
+                    0,
+                    &[t],
+                )?;
             }
         }
         // Flying snow, snowballs and snowmen go on top of everything.
@@ -1719,7 +1756,7 @@ impl Drop for X11Backend {
             for pic in p
                 .layers
                 .into_iter()
-                .chain([p.pile_fill, p.pile_shadow])
+                .chain([p.pile_fill, p.pile_shadow, p.ice_fill, p.ice_shine])
                 .chain(images)
             {
                 let _ = self.conn.render_free_picture(pic);

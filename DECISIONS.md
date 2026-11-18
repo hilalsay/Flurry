@@ -189,3 +189,10 @@ decided and why.
   drips (≈ 6 drips/s per core). The planned "heat shimmer" isn't drawn: a distortion effect would need
   the pixels behind the window, which a click-through overlay doesn't have. The drips carry the
   effect instead.
+- **Phase 8 / feature 2, icicles** (`features.icicles = true`). After 40 s with ≥ 300 px² of snow on
+  top, a window grows icicles (about one per 55 px, 6–30 px long, 0.25 px/s) along its **bottom**
+  edge, as planned, and a panel grows them from its top edge. They melt back at 0.15 px/s without
+  snow, drip now and then, and are clipped by windows stacked above. A fling (the pile's knock-off
+  event) snaps them off; they fall with half the window's velocity and shatter into loose snow on the
+  first pile or the screen bottom. Closing or maximizing drops them too. Drawn as two XRender
+  triangles each (body + glint), redrawn only when an icicle changes by a whole pixel.
