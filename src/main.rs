@@ -15,7 +15,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         None => run_daemon(&cli, &config_path),
-        Some(cmd) => run_command(cmd),
+        Some(cmd) => run_command(cmd, &config_path),
     }
 }
 
@@ -29,10 +29,11 @@ fn run_daemon(cli: &Cli, config_path: &std::path::Path) -> Result<()> {
     anyhow::bail!("no display backend implemented yet (phases 2–3)")
 }
 
-fn run_command(cmd: Command) -> Result<()> {
+fn run_command(cmd: Command, config_path: &std::path::Path) -> Result<()> {
     match cmd {
-        Command::RenderTest { .. } => {
-            anyhow::bail!("render-test is not implemented yet (phase 1)")
+        Command::RenderTest { frames, out, seed } => {
+            let config = Config::load(config_path)?;
+            flurry::render_test::run(&config, frames, &out, seed)
         }
         other => anyhow::bail!("{other:?}: IPC is not implemented yet (phase 4)"),
     }

@@ -10,8 +10,10 @@ anyhow = "1.0.104"
 clap = { version = "4.6.8", features = ["derive"] }
 directories = "6.0.0"
 env_logger = "0.11.11"
+fastrand = "2.5.0"
 log = "0.4.35"
 serde = { version = "1.0.229", features = ["derive"] }
+tiny-skia = "0.12.0"
 toml = "1.2.1"
 
 [profile.release]

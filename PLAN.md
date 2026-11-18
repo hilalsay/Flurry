@@ -15,6 +15,14 @@
   tests and benches can reach every module.
 - **Phase 0:** The `Backend` trait is added in Phase 2 together with its first implementation,
   not as an unused stub.
+- **Phase 1:** `flake_count` (and intensity) means flakes **per 1920×1080 of screen area**, not in
+  total. Otherwise two monitors would get half the density and a 4K screen a quarter.
+- **Phase 1:** Flakes are drawn from pre-rendered sprites (radius in 0.25 px steps × 4×4 subpixel
+  offsets) with a hand-written premultiplied src-over blit, not with tiny-skia circles. A
+  tiny-skia pipeline per tiny flake would cost more than the drawing itself. tiny-skia is still
+  the pixmap type and is used for piles and other shapes. Measured (release): sim step 11 µs and
+  full 1080p frame 0.77 ms for 300 flakes. The full frame is mostly clearing 8 MB, so damage
+  tracking in Phase 2 is required to meet the CPU budget.
 
 ---
 
@@ -179,8 +187,8 @@ pub trait Backend {
 
 ### Config (`~/.config/flurry/config.toml`)
 ```toml
-intensity = "medium"      # light | medium | heavy  (150 / 300 / 600 flakes)
-flake_count = 300         # overrides intensity if set
+intensity = "medium"      # light | medium | heavy  (150 / 300 / 600 flakes per 1080p of screen)
+flake_count = 300         # overrides intensity if set; per 1920×1080 of screen area
 fall_speed = 1.0
 wind = 1.0
 max_pile_height = 40      # px
