@@ -211,3 +211,14 @@ decided and why.
   directions pointing away from the corner × 2 branch patterns × 4 densities, with a haze that
   thickens with density, so neighbouring cells join into fern-like streaks. Growth runs at 4 Hz, so
   the 60 Hz step stays cheap (sim step 20 µs). Without a known pointer (Wayland) frost stays off.
+- **Phase 8 / feature 5, real weather** (opt-in: `features.real_weather = false`,
+  `features.weather_city = ""`). Geocoding and forecast come from Open-Meteo (no key) via the system
+  `curl` (no HTTP crate) and `serde_json` (planned in §3). Snowfall ≥ 1 cm/h → heavy, ≥ 0.2 cm/h or a
+  heavy-snow WMO code → medium, otherwise (light snow, rain, dry) → **gentle = light**; the plan's
+  "or pause" option was left out to keep the config small. Wind: speed / 15 km/h (≤ 4) times the
+  east-west component of the meteorological direction (wind from the west blows right), multiplied
+  by the user's `wind`. Refresh every 15 min (retry 2 min). The coordinates and last result are
+  cached in `~/.cache/flurry/weather.json`; at startup a cached result younger than 6 h applies at
+  once, so it works offline. The city is only ever taken from the config. Checked live with a
+  neutral city (Oslo) and temporary dirs: geocoding, forecast and cache all work. `flurry status`
+  now shows the effective intensity/fps (weather, battery).

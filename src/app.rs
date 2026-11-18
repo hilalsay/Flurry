@@ -124,6 +124,9 @@ pub fn run(config: Config, opts: &RunOptions) -> Result<()> {
         backend.outputs().len()
     );
     let _watchers = power::watch(&tx, true);
+    if config.features.real_weather {
+        crate::weather::watch(config.features.weather_city.clone(), tx.clone());
+    }
     let tray = Tray::spawn(tx, tray_state(&config, false));
     let mut main = MainLoop::new(config, opts.config_path.clone(), backend.as_mut(), rx, tray);
     let result = main.run();
@@ -158,6 +161,8 @@ struct MainLoop<'b> {
     battery_checked: Option<Instant>,
     heat: crate::heat::Heat,
     heat_sampled: Option<Instant>,
+    /// Real weather (feature 5), when known.
+    weather: Option<crate::weather::Effect>,
     commands: Receiver<Request>,
     tray: Option<Tray>,
     stats: Stats,
@@ -180,10 +185,15 @@ impl From<PauseReason> for PauseReasonKey {
     }
 }
 
-/// The config as it applies right now: on battery, half the flakes and at
-/// most 30 fps.
-fn effective(config: &Config, on_battery: bool) -> Config {
+/// The config as it applies right now: real weather sets intensity and
+/// wind; on battery, half the flakes and at most 30 fps.
+fn effective(config: &Config, on_battery: bool, weather: Option<crate::weather::Effect>) -> Config {
     let mut c = config.clone();
+    if let Some(w) = weather {
+        c.intensity = w.intensity;
+        c.flake_count = None;
+        c.wind = config.wind * w.wind;
+    }
     if on_battery {
         c.flake_count = Some(c.effective_flake_count() / 2);
         c.fps = c.fps.min(30);
@@ -228,6 +238,7 @@ impl<'b> MainLoop<'b> {
             battery_checked: None,
             heat: crate::heat::Heat::new(),
             heat_sampled: None,
+            weather: None,
             commands,
             tray,
             stats: Stats::default(),
@@ -420,6 +431,11 @@ impl<'b> MainLoop<'b> {
                 self.set_auto(reason, on)?;
                 "ok".into()
             }
+            Command::Weather(e) => {
+                self.weather = Some(e);
+                self.apply_config();
+                "ok".into()
+            }
             Command::Wake => {
                 for event in self.backend.rescan()? {
                     self.handle_event(event)?;
@@ -433,14 +449,14 @@ impl<'b> MainLoop<'b> {
     fn status(&self) -> String {
         format!(
             "{} intensity={} fps={} flakes={} monitors={} panels={} windows={} snow={:.0} \
-             on_windows={:.0} flying={} snowballs={} snowmen={}",
+             on_windows={:.0} flying={} snowballs={} snowmen={}{}{}",
             match (self.paused, self.auto_reasons()) {
                 (true, _) => "paused".to_owned(),
                 (false, None) => "running".to_owned(),
                 (false, Some(why)) => format!("auto-paused({why})"),
             },
-            ipc::intensity_name(self.config.intensity),
-            self.config.fps,
+            ipc::intensity_name(effective(&self.config, self.on_battery, self.weather).intensity),
+            effective(&self.config, self.on_battery, self.weather).fps,
             self.world.flakes().len(),
             self.inputs.outputs.len(),
             self.inputs.obstacles.len(),
@@ -456,7 +472,11 @@ impl<'b> MainLoop<'b> {
                 .max(0.0),
             self.world.particles().len(),
             self.world.snowfolk().balls().len(),
-            self.world.snowfolk().snowmen().len()
+            self.world.snowfolk().snowmen().len(),
+            if self.on_battery { " battery" } else { "" },
+            self.weather
+                .map(|w| format!(" weather_wind={:.2}", w.wind))
+                .unwrap_or_default()
         )
     }
 
@@ -497,7 +517,7 @@ impl<'b> MainLoop<'b> {
 
     /// Push the current config into the world, the frame pacing and the tray.
     fn apply_config(&mut self) {
-        let config = effective(&self.config, self.on_battery);
+        let config = effective(&self.config, self.on_battery, self.weather);
         self.world.set_params(SimParams::from_config(&config));
         self.frame_interval = frame_interval(config.fps);
         self.update_tray();

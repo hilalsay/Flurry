@@ -17,7 +17,7 @@ use crate::config::Intensity;
 use crate::power::PauseReason;
 
 /// Something the daemon can be asked to do (CLI, tray, hotkey, signals).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Command {
     Toggle,
     Clear,
@@ -32,6 +32,8 @@ pub enum Command {
     Auto(PauseReason, bool),
     /// Internal: the machine woke from sleep.
     Wake,
+    /// Internal: new real weather (feature 5).
+    Weather(crate::weather::Effect),
 }
 
 impl Command {
@@ -49,6 +51,7 @@ impl Command {
                 format!("auto-pause {} {}", r.name(), if *on { "on" } else { "off" })
             }
             Command::Wake => "wake".into(),
+            Command::Weather(e) => format!("weather {e:?}"),
         }
     }
 

@@ -15,6 +15,7 @@ ksni = { version = "0.3.7", default-features = false, features = ["blocking", "a
 log = "0.4.35"
 rustix = { version = "1.1.6", features = ["event", "process"] }
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 signal-hook = "0.4.6"
 tiny-skia = "0.12.0"
 toml = "1.2.1"

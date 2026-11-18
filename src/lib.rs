@@ -14,3 +14,4 @@ pub mod render;
 pub mod render_test;
 pub mod sim;
 pub mod tray;
+pub mod weather;
