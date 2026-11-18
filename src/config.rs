@@ -81,6 +81,8 @@ pub struct Features {
     pub hot_apps_melt: bool,
     /// Icicles grow under snowy windows and on the panel.
     pub icicles: bool,
+    /// Typing in a window shakes little clumps off its top.
+    pub typing_shakes_snow: bool,
 }
 
 impl Default for Features {
@@ -88,6 +90,7 @@ impl Default for Features {
         Self {
             hot_apps_melt: true,
             icicles: true,
+            typing_shakes_snow: true,
         }
     }
 }

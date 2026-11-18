@@ -26,6 +26,7 @@ use x11rb::protocol::render::{
     Pictformat, Pointfix,
 };
 use x11rb::protocol::shape::{self, ConnectionExt as _};
+use x11rb::protocol::xinput::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ChangeWindowAttributesAux, ClipOrdering, ColormapAlloc, ConfigureWindowAux,
     ConnectionExt as _, CreateWindowAux, EventMask, GetPropertyReply, GrabMode, Keycode, MapState,
@@ -188,6 +189,7 @@ struct Pending {
     windows_dirty: bool,
     windows_moved: bool,
     redraw: Vec<usize>,
+    keys: u32,
 }
 
 pub struct X11Backend {
@@ -227,6 +229,7 @@ pub struct X11Backend {
     windows_queried: Option<Instant>,
     /// The focused window is fullscreen.
     fullscreen: bool,
+    active: Option<u64>,
 }
 
 impl X11Backend {
@@ -307,7 +310,9 @@ impl X11Backend {
             watched: HashSet::new(),
             windows_queried: None,
             fullscreen: false,
+            active: None,
         };
+        backend.listen_for_typing();
         if let Some(hk) = opts.hotkey {
             backend.hotkey = backend.grab_hotkey(hk)?;
         }
@@ -997,6 +1002,39 @@ impl X11Backend {
         changed
     }
 
+    /// XInput2 raw key presses on the root window: we only count them (for
+    /// "typing shakes snow loose"), never look at which keys they are.
+    fn listen_for_typing(&self) {
+        let ok = self
+            .conn
+            .extension_information(xinput::X11_EXTENSION_NAME)
+            .ok()
+            .flatten()
+            .is_some()
+            && self
+                .conn
+                .xinput_xi_query_version(2, 0)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .is_some_and(|v| v.major_version >= 2);
+        if !ok {
+            log::info!("no XInput2: typing won't shake snow loose");
+            return;
+        }
+        let mask = xinput::EventMask {
+            deviceid: 1, // XIAllMasterDevices
+            mask: vec![xinput::XIEventMask::RAW_KEY_PRESS],
+        };
+        match self.conn.xinput_xi_select_events(self.root, &[mask]) {
+            Ok(c) => {
+                if let Err(e) = c.check() {
+                    log::info!("cannot follow typing: {e}");
+                }
+            }
+            Err(e) => log::info!("cannot follow typing: {e}"),
+        }
+    }
+
     /// Is the active window fullscreen? Returns true if that changed.
     fn update_fullscreen(&mut self) -> Result<bool> {
         let active = self
@@ -1004,6 +1042,7 @@ impl X11Backend {
             .first()
             .copied()
             .unwrap_or(x11rb::NONE);
+        self.active = (active != x11rb::NONE).then_some(u64::from(active));
         let fs = self.clients.iter().any(|c| c.id == active && c.fullscreen);
         let changed = fs != self.fullscreen;
         if changed {
@@ -1182,6 +1221,7 @@ impl X11Backend {
                 }
             }
             Event::RandrScreenChangeNotify(_) | Event::RandrNotify(_) => p.outputs_changed = true,
+            Event::XinputRawKeyPress(_) => p.keys += 1,
             // Windows can vanish between our queries; that's not a problem.
             Event::Error(e) if e.error_kind == x11rb::protocol::ErrorKind::Window => {
                 log::debug!("X11: window {:#x} went away", e.bad_value);
@@ -1597,6 +1637,10 @@ impl Backend for X11Backend {
         self.fullscreen
     }
 
+    fn active_window(&self) -> Option<u64> {
+        self.active
+    }
+
     fn rescan(&mut self) -> Result<Vec<BackendEvent>> {
         let mut events = Vec::new();
         if self.rebuild_if_outputs_changed()? {
@@ -1713,6 +1757,9 @@ impl Backend for X11Backend {
             p.redraw.into_iter().map(BackendEvent::Redraw).collect();
         if p.hotkey {
             events.push(BackendEvent::Hotkey);
+        }
+        if p.keys > 0 {
+            events.push(BackendEvent::Keys(p.keys));
         }
         p.raise = !p.raise_for.is_empty() && self.should_raise(std::mem::take(&mut p.raise_for))?;
         let mut rebuilt = p.outputs_changed && self.rebuild_if_outputs_changed()?;

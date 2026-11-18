@@ -196,3 +196,8 @@ decided and why.
   event) snaps them off; they fall with half the window's velocity and shatter into loose snow on the
   first pile or the screen bottom. Closing or maximizing drops them too. Drawn as two XRender
   triangles each (body + glint), redrawn only when an icicle changes by a whole pixel.
+- **Phase 8 / feature 3, typing shakes snow loose** (`features.typing_shakes_snow = true`). XInput2
+  `RawKeyPress` on the root window (all master devices). flurry **only counts** presses; it never
+  reads which key was pressed. About one key in three knocks a small clump (≤ 1.5 px deep, 3
+  columns) off the focused window's pile, popping up and sideways. Subtle by design. No XInput2 →
+  the feature switches off with an info log.

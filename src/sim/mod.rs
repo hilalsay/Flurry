@@ -34,6 +34,8 @@ pub struct SimParams {
     pub hot_apps_melt: bool,
     /// Feature: icicles on snowy windows and panels.
     pub icicles: bool,
+    /// Feature: typing shakes snow off the focused window.
+    pub typing_shakes_snow: bool,
 }
 
 impl SimParams {
@@ -48,6 +50,7 @@ impl SimParams {
             carry_modifier: c.carry_modifier,
             hot_apps_melt: c.features.hot_apps_melt,
             icicles: c.features.icicles,
+            typing_shakes_snow: c.features.typing_shakes_snow,
         }
     }
 }
@@ -220,6 +223,12 @@ impl World {
         self.particles.step(dt, &bounds, |p, y_before| {
             piles.land(p.x, y_before, p.y, p.radius(), p.volume, max_h)
         });
+        if self.params.typing_shakes_snow && inputs.keys_pressed > 0 {
+            if let Some(id) = inputs.active_window {
+                self.piles
+                    .shake(id, inputs.keys_pressed, &mut self.particles);
+            }
+        }
         let no_heat = std::collections::HashMap::new();
         let heat = if self.params.hot_apps_melt {
             &inputs.window_heat

@@ -93,6 +93,10 @@ pub struct Inputs {
     pub hidden_windows: Vec<u64>,
     /// CPU load of each window's program (1.0 = one core), by window id.
     pub window_heat: std::collections::HashMap<u64, f32>,
+    /// The focused window.
+    pub active_window: Option<u64>,
+    /// Keys pressed since the last step (counted only, never which keys).
+    pub keys_pressed: u32,
     /// Panels, docks, taskbars (id = window id).
     pub obstacles: Vec<WindowRect>,
     /// `None` when the backend cannot see the cursor (most Wayland desktops).

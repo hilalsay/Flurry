@@ -266,6 +266,8 @@ impl<'b> MainLoop<'b> {
             };
             while acc >= STEP {
                 self.world.step(STEP.as_secs_f32(), &self.inputs);
+                // Key presses count once, in the first step that sees them.
+                self.inputs.keys_pressed = 0;
                 acc -= STEP;
             }
             self.draw()?;
@@ -291,6 +293,7 @@ impl<'b> MainLoop<'b> {
             }
             BackendEvent::WindowsChanged => {
                 self.windows_changed();
+                self.inputs.active_window = self.backend.active_window();
                 let fs = self.config.auto_pause_fullscreen && self.backend.fullscreen();
                 self.set_auto(PauseReason::Fullscreen, fs)?;
             }
@@ -298,6 +301,9 @@ impl<'b> MainLoop<'b> {
                 if let Some(s) = self.surfaces.get_mut(i) {
                     s.invalidate();
                 }
+            }
+            BackendEvent::Keys(n) => {
+                self.inputs.keys_pressed = self.inputs.keys_pressed.saturating_add(n);
             }
         }
         Ok(())

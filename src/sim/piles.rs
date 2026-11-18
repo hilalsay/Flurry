@@ -450,6 +450,42 @@ impl Piles {
         true
     }
 
+    /// Typing: knock up to one small clump per key off window `id`'s pile.
+    pub fn shake(&mut self, id: u64, keys: u32, particles: &mut Particles) {
+        let key = SurfaceKey::Window(id);
+        let Some(s) = self.surfaces.iter_mut().find(|s| s.key == key) else {
+            return;
+        };
+        for _ in 0..keys.min(20) {
+            // Subtle: about one key in three.
+            if self.rng.f32() > 0.35 {
+                continue;
+            }
+            let c = self.rng.usize(..s.heights.len());
+            if s.heights[c] < 1.5 {
+                continue;
+            }
+            let (c0, c1) = (c.saturating_sub(1), (c + 2).min(s.heights.len()));
+            let mut volume = 0.0;
+            for h in &mut s.heights[c0..c1] {
+                let t = h.min(1.5);
+                *h -= t;
+                volume += t * COL_W;
+            }
+            let side = if self.rng.bool() { 1.0 } else { -1.0 };
+            particles.spawn(
+                Particle {
+                    x: s.x0 + (c as f32 + 0.5) * COL_W,
+                    y: s.y - s.heights[c] - 2.0,
+                    vx: side * 50.0,
+                    vy: -60.0,
+                    volume,
+                },
+                20.0,
+            );
+        }
+    }
+
     /// Slide, spill and melt. `heat` (window id → CPU load) makes busy
     /// windows melt faster and drip.
     pub fn step(
@@ -861,6 +897,21 @@ mod tests {
             hot_drips > cold_drips,
             "{hot_drips} vs {cold_drips} particles"
         );
+    }
+
+    #[test]
+    fn typing_shakes_a_little_snow_loose() {
+        let (mut p, mut parts) = (Piles::default(), Particles::new(0));
+        let before = snowy_window(&mut p, &mut parts);
+        p.shake(42, 30, &mut parts);
+        let after = window_pile(&p).unwrap().volume();
+        assert!(after < before, "some snow came off");
+        assert!(
+            after > before * 0.9,
+            "but only a little: {after} of {before}"
+        );
+        assert!(!parts.is_empty());
+        p.shake(999, 30, &mut parts); // another window: nothing happens
     }
 
     #[test]

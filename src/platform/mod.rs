@@ -33,6 +33,8 @@ pub enum BackendEvent {
     WindowsChanged,
     /// Output `n`'s windows lost their content (e.g. Expose): redraw it in full.
     Redraw(usize),
+    /// This many keys were pressed anywhere (counted, not identified).
+    Keys(u32),
 }
 
 /// Everything to show on one output this frame.
@@ -126,6 +128,9 @@ pub trait Backend {
 
     /// Is the focused window fullscreen (a video, a game, a presentation)?
     fn fullscreen(&self) -> bool;
+
+    /// The focused window, if known.
+    fn active_window(&self) -> Option<u64>;
 
     /// Re-read monitors, panels and windows (e.g. after waking from sleep).
     /// Returns the events that produces.
