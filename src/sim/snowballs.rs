@@ -328,7 +328,10 @@ impl Snowfolk {
                 return;
             }
         }
-        if self.is_carrying() || vx.abs() < MIN_PUSH_SPEED {
+        // Modifier + left drag is for carrying or writing in the snow,
+        // not for rolling.
+        let writing = c.left_down && modifier_held(env.carry, c);
+        if self.is_carrying() || writing || vx.abs() < MIN_PUSH_SPEED {
             return;
         }
         // Push a ball the cursor runs into: it stays just ahead of the

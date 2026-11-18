@@ -42,6 +42,8 @@ pub struct SimParams {
     pub frost_after: Option<f32>,
     /// Feature: shake the mouse to whirl snow up.
     pub snow_globe: bool,
+    /// Feature: modifier + drag writes in the snow.
+    pub write_in_snow: bool,
 }
 
 impl SimParams {
@@ -62,6 +64,7 @@ impl SimParams {
                 .frost
                 .then_some(c.features.frost_idle_minutes.max(0.0) * 60.0),
             snow_globe: c.features.snow_globe,
+            write_in_snow: c.features.write_in_snow,
         }
     }
 }
@@ -87,6 +90,8 @@ pub struct World {
     icicles: icicles::Icicles,
     frost: frost::Frost,
     globe: globe::Globe,
+    /// Where the pointer was while writing in the snow last step.
+    pen: Option<(f32, f32)>,
     /// The layout the piles were last synced to.
     layout: Layout,
 }
@@ -127,6 +132,7 @@ impl World {
             icicles: icicles::Icicles::default(),
             frost: frost::Frost::default(),
             globe: globe::Globe::default(),
+            pen: None,
             layout: Layout::default(),
         }
     }
@@ -278,6 +284,9 @@ impl World {
             self.icicles
                 .step(dt, inputs, &mut self.piles, &mut self.particles, bounds);
         }
+        if self.params.write_in_snow && self.params.interaction {
+            self.write(inputs.cursor);
+        }
         if self.params.snow_globe && self.params.interaction {
             let cursor = inputs.cursor;
             if self
@@ -291,6 +300,32 @@ impl World {
             Some(after) => self.frost.step(dt, &inputs.outputs, inputs.cursor, after),
             None => self.frost.clear(),
         }
+    }
+
+    /// Feature 9: with the carry modifier and the left button held (and no
+    /// snowball in hand), the pointer carves its path into the snow.
+    fn write(&mut self, cursor: Option<crate::geom::CursorState>) {
+        let pen = cursor.filter(|c| {
+            c.left_down
+                && snowballs::modifier_held(self.params.carry_modifier, c)
+                && !self.snowfolk.is_carrying()
+        });
+        let Some(c) = pen else {
+            self.pen = None;
+            return;
+        };
+        let from = self.pen.unwrap_or((c.x, c.y));
+        let len = (c.x - from.0).hypot(c.y - from.1);
+        let steps = (len / 1.5).ceil().max(1.0) as usize;
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            self.piles.carve(
+                from.0 + (c.x - from.0) * t,
+                from.1 + (c.y - from.1) * t,
+                2.5,
+            );
+        }
+        self.pen = Some((c.x, c.y));
     }
 
     fn sync_piles(&mut self, inputs: &Inputs) {

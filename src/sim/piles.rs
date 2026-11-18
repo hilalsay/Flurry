@@ -36,6 +36,13 @@ const HEAT_MIN: f32 = 0.15;
 /// Drips per second from a pile on a window using one full core.
 const DRIPS_PER_LOAD: f32 = 6.0;
 
+/// Grooves written into the snow (feature 9) fill back in after this long,
+/// sooner where snow lands.
+const GROOVE_HOLD: f32 = 120.0;
+const GROOVE_FILL_PER_FLAKE: f32 = 12.0;
+/// Groove cells are this many px square.
+pub const GROOVE_CELL: f32 = 2.0;
+
 /// Stacking depth of a surface: ground below every window, panels above.
 pub const Z_GROUND: i32 = -1;
 pub const Z_PANEL: i32 = i32::MAX;
@@ -72,6 +79,9 @@ pub struct Surface {
     moved_at: f64,
     /// Snow that slid over the left/right edge, not yet a particle (px²).
     spill: [f32; 2],
+    /// Carved cells (column, row up from the surface line) → seconds until
+    /// they fill back in.
+    grooves: HashMap<(u32, u32), f32>,
 }
 
 impl Surface {
@@ -84,7 +94,38 @@ impl Surface {
             heights: vec![0.0; columns(spec.x0, spec.x1)],
             moved_at: now,
             spill: [0.0; 2],
+            grooves: HashMap::new(),
         }
+    }
+
+    /// Carved-out areas as global rects (merged into runs per row).
+    pub fn groove_rects(&self) -> Vec<Rect> {
+        let mut cells: Vec<(u32, u32)> = self.grooves.keys().copied().collect();
+        cells.sort_unstable_by_key(|&(c, r)| (r, c));
+        let mut out: Vec<Rect> = Vec::new();
+        let mut run: Option<(u32, u32, u32)> = None; // row, first col, last col
+        let cell = GROOVE_CELL as u32;
+        let flush = |run: Option<(u32, u32, u32)>, out: &mut Vec<Rect>| {
+            if let Some((row, c0, c1)) = run {
+                out.push(Rect::new(
+                    (self.x0 + c0 as f32 * GROOVE_CELL) as i32,
+                    (self.y - (row + 1) as f32 * GROOVE_CELL) as i32,
+                    (c1 - c0 + 1) * cell,
+                    cell,
+                ));
+            }
+        };
+        for (c, r) in cells {
+            run = match run {
+                Some((row, c0, c1)) if row == r && c == c1 + 1 => Some((row, c0, c)),
+                prev => {
+                    flush(prev, &mut out);
+                    Some((r, c, c))
+                }
+            };
+        }
+        flush(run, &mut out);
+        out
     }
 
     /// Right edge, global px.
@@ -346,8 +387,44 @@ impl Piles {
         for s in &mut self.surfaces {
             s.heights.fill(0.0);
             s.spill = [0.0; 2];
+            s.grooves.clear();
         }
         self.parked.clear();
+    }
+
+    /// Write in the snow: carve the cells within `radius` px of (`x`, `y`)
+    /// on any pile that has snow there.
+    pub fn carve(&mut self, x: f32, y: f32, radius: f32) -> bool {
+        let mut carved = false;
+        for s in &mut self.surfaces {
+            let Some(top) = s.top_at(x) else { continue };
+            if y < top - radius || y > s.y + radius {
+                continue;
+            }
+            let (c0, c1) = (
+                ((x - radius - s.x0) / GROOVE_CELL).floor().max(0.0) as u32,
+                ((x + radius - s.x0) / GROOVE_CELL).ceil().max(0.0) as u32,
+            );
+            let (r0, r1) = (
+                ((s.y - y - radius) / GROOVE_CELL).floor().max(0.0) as u32,
+                ((s.y - y + radius) / GROOVE_CELL).ceil().max(0.0) as u32,
+            );
+            for c in c0..=c1 {
+                for r in r0..=r1 {
+                    let (cx, cy) = (
+                        s.x0 + (c as f32 + 0.5) * GROOVE_CELL,
+                        s.y - (r as f32 + 0.5) * GROOVE_CELL,
+                    );
+                    let col = ((cx - s.x0) / COL_W) as usize;
+                    let in_snow = s.heights.get(col).is_some_and(|h| cy >= s.y - h);
+                    if in_snow && (cx - x).hypot(cy - y) <= radius {
+                        s.grooves.insert((c, r), GROOVE_HOLD);
+                        carved = true;
+                    }
+                }
+            }
+        }
+        carved
     }
 
     /// Match the surfaces to the current monitors, panels and windows at sim
@@ -447,6 +524,16 @@ impl Piles {
         for (c, h) in s.heights.iter_mut().enumerate().take(c1 + 1).skip(c0) {
             *h = (*h + height * weight(c) / total).min(max_h);
         }
+        // Fresh snow fills grooves in the columns it landed on.
+        if !s.grooves.is_empty() {
+            let per_col = (COL_W / GROOVE_CELL).max(1.0) as u32;
+            let (g0, g1) = (c0 as u32 * per_col, (c1 as u32 + 1) * per_col);
+            for ((c, _), left) in s.grooves.iter_mut() {
+                if (g0..g1).contains(c) {
+                    *left -= GROOVE_FILL_PER_FLAKE;
+                }
+            }
+        }
         true
     }
 
@@ -499,6 +586,18 @@ impl Piles {
         for s in &mut self.surfaces {
             s.slump();
             s.emit_spill(particles);
+            if !s.grooves.is_empty() {
+                // Grooves fill in with time, and wherever the snow is gone.
+                let heights = &s.heights;
+                s.grooves.retain(|&(c, r), left| {
+                    *left -= dt;
+                    let col = (c as f32 * GROOVE_CELL / COL_W) as usize;
+                    let still_snow = heights
+                        .get(col)
+                        .is_some_and(|h| (r as f32) * GROOVE_CELL < *h);
+                    *left > 0.0 && still_snow
+                });
+            }
             let load = match s.key {
                 SurfaceKey::Window(id) => heat.get(&id).copied().unwrap_or(0.0),
                 _ => 0.0,
@@ -912,6 +1011,51 @@ mod tests {
         );
         assert!(!parts.is_empty());
         p.shake(999, 30, &mut parts); // another window: nothing happens
+    }
+
+    #[test]
+    fn writing_carves_grooves_that_fill_back_in() {
+        let mut p = piles_with_panel();
+        p.surfaces[0].heights.fill(20.0);
+        // A stroke across the snow.
+        for x in 100..140 {
+            assert!(p.carve(x as f32, 1030.0, 2.5));
+        }
+        let rects = p.surfaces[0].groove_rects();
+        assert!(
+            !rects.is_empty() && rects.len() < 20,
+            "merged runs: {}",
+            rects.len()
+        );
+        assert!(
+            rects.iter().all(|r| r.y >= 1020 && r.bottom() <= 1040),
+            "{rects:?}"
+        );
+        assert!(!p.carve(500.0, 900.0, 2.5), "above the snow: nothing");
+        // Snow landing there fills it.
+        for _ in 0..20 {
+            assert!(p.try_land(120.0, 900.0, 1040.0, 3.0, 40.0));
+        }
+        p.step(
+            1.0 / 60.0,
+            0.0,
+            40.0,
+            &mut Particles::new(0),
+            &HashMap::new(),
+        );
+        assert!(
+            !p.surfaces[0].grooves.keys().any(|&(c, _)| c == 60),
+            "the column where snow fell is filled"
+        );
+        // And the rest fills in with time.
+        p.step(
+            GROOVE_HOLD + 1.0,
+            0.0,
+            40.0,
+            &mut Particles::new(0),
+            &HashMap::new(),
+        );
+        assert!(p.surfaces[0].groove_rects().is_empty());
     }
 
     #[test]

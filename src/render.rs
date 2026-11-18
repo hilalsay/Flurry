@@ -546,12 +546,15 @@ impl PileTracker {
     }
 }
 
-/// Occluders above surface `s` that overlap `area` (both output-local).
+/// Where pile `s` must not be drawn within `area` (both output-local):
+/// windows/panels stacked above it, and grooves written into it.
 fn holes_for(world: &World, s: &Surface, area: Rect, output: Rect) -> Vec<Rect> {
     world
         .occluders()
         .filter(|(z, _)| *z > s.z)
-        .map(|(_, r)| Rect::new(r.x - output.x, r.y - output.y, r.w, r.h))
+        .map(|(_, r)| r)
+        .chain(s.groove_rects())
+        .map(|r| Rect::new(r.x - output.x, r.y - output.y, r.w, r.h))
         .filter_map(|r| r.intersect(&area))
         .collect()
 }
@@ -1416,4 +1419,90 @@ fn frost_to_png() {
     let dir = std::path::PathBuf::from(dir);
     std::fs::create_dir_all(&dir).unwrap();
     bg.save_png(dir.join("frost.png")).unwrap();
+}
+
+/// Writes "HI" into the panel pile with Alt + left drags and saves it to
+/// `$FLURRY_ART_OUT/writing.png`:
+/// `FLURRY_ART_OUT=/tmp/art cargo test --release -- --ignored writing_to_png`
+#[cfg(test)]
+#[test]
+#[ignore]
+fn writing_to_png() {
+    let Some(dir) = std::env::var_os("FLURRY_ART_OUT") else {
+        return;
+    };
+    let mut inputs = crate::sim::test_util::inputs_1080p();
+    inputs.obstacles.push(crate::geom::WindowRect {
+        id: 1,
+        rect: Rect::new(0, 1040, 1920, 40),
+    });
+    let mut world = World::new(crate::sim::SimParams::default(), 4);
+    for _ in 0..60 * 60 * 10 {
+        world.step(1.0 / 60.0, &inputs);
+    }
+    let pen = |x: f32, y: f32, down: bool| crate::geom::CursorState {
+        x,
+        y,
+        left_down: down,
+        alt: true,
+        super_: false,
+    };
+    let strokes: [((f32, f32), (f32, f32)); 4] = [
+        ((900.0, 1022.0), (900.0, 1037.0)),
+        ((914.0, 1022.0), (914.0, 1037.0)),
+        ((900.0, 1029.5), (914.0, 1029.5)),
+        ((928.0, 1022.0), (928.0, 1037.0)),
+    ];
+    for ((x0, y0), (x1, y1)) in strokes {
+        inputs.cursor = Some(pen(x0, y0, false));
+        world.step(1.0 / 60.0, &inputs);
+        for i in 0..=20 {
+            let t = i as f32 / 20.0;
+            inputs.cursor = Some(pen(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, true));
+            world.step(1.0 / 60.0, &inputs);
+        }
+    }
+    inputs.cursor = Some(pen(1200.0, 500.0, false));
+    world.step(1.0 / 60.0, &inputs);
+    let out = inputs.outputs[0].rect;
+    let renderer = Renderer::new();
+    let (mut tracker, mut scene) = (PileTracker::default(), PileScene::default());
+    tracker.invalidate();
+    renderer.build_pile_scene(&world, out, &mut tracker, &mut scene);
+    let mut top = Pixmap::new(out.w, out.h).unwrap();
+    renderer.rasterize_piles(&scene, &mut top);
+    let mut bg = Pixmap::new(out.w, out.h).unwrap();
+    bg.fill(Color::from_rgba8(40, 44, 52, 255));
+    bg.draw_pixmap(
+        0,
+        0,
+        top.as_ref(),
+        &tiny_skia::PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
+    let mut crop = Pixmap::new(120, 50).unwrap();
+    crop.draw_pixmap(
+        -860,
+        -1000,
+        bg.as_ref(),
+        &tiny_skia::PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
+    let mut big = Pixmap::new(480, 200).unwrap();
+    big.draw_pixmap(
+        0,
+        0,
+        crop.as_ref(),
+        &tiny_skia::PixmapPaint {
+            quality: tiny_skia::FilterQuality::Nearest,
+            ..Default::default()
+        },
+        Transform::from_scale(4.0, 4.0),
+        None,
+    );
+    let dir = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    big.save_png(dir.join("writing.png")).unwrap();
 }

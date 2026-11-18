@@ -246,3 +246,11 @@ decided and why.
     titles are not detected. Verified live with a fake indicator window: paused while it was open,
     resumed after. (b) is unit-tested only (no screen cast could be started here); verifying it on
     Plasma 6 is part of Phase 9.
+- **Phase 8 / feature 9, write in the snow** (`features.write_in_snow = true`). A pile is a 1D
+  height profile, which can't hold letter shapes, so each pile also has a groove mask of 2×2 px cells.
+  Carry modifier + left drag through snow carves a 5 px-wide stroke (interpolated, so fast strokes
+  have no gaps). Grooves are drawn as holes in the pile (the panel shows through), so you can write a
+  short word in a deep enough pile. Each landed flake shortens the refill time of the grooves under
+  it by 12 s, and every groove fills in after 120 s anyway (or once the snow under it has melted).
+  While writing, the drag doesn't scoop or push snowballs. Pressing on a ball still picks it up.
+  Checked with a scripted "HI" rendered to PNG.

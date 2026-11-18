@@ -93,6 +93,8 @@ pub struct Features {
     pub music_wind: bool,
     /// Pause while any window is fullscreen or the screen is being shared.
     pub privacy_pause: bool,
+    /// Carry modifier + left drag through a pile writes in the snow.
+    pub write_in_snow: bool,
     /// Opt-in: follow the real weather of `weather_city` (Open-Meteo).
     pub real_weather: bool,
     /// City name for real weather mode, e.g. "Istanbul". Never auto-detected.
@@ -110,6 +112,7 @@ impl Default for Features {
             snow_globe: true,
             music_wind: false,
             privacy_pause: true,
+            write_in_snow: true,
             real_weather: false,
             weather_city: String::new(),
         }
