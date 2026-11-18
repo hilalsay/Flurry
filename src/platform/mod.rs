@@ -10,7 +10,7 @@ pub mod x11;
 use std::time::Duration;
 
 use crate::config::{Layering, Monitors};
-use crate::geom::{OutputInfo, WindowRect};
+use crate::geom::{AppWindow, OutputInfo, WindowRect};
 use crate::render::{PileScene, Scene, SpriteSheet};
 use anyhow::{bail, Result};
 
@@ -28,6 +28,9 @@ pub enum BackendEvent {
     Hotkey,
     /// Panels/docks moved, resized, appeared or vanished: re-read `obstacles()`.
     ObstaclesChanged,
+    /// App windows moved, restacked, appeared, vanished or changed state:
+    /// re-read `windows()` and `hidden_windows()`.
+    WindowsChanged,
     /// Output `n`'s windows lost their content (e.g. Expose): redraw it in full.
     Redraw(usize),
 }
@@ -113,6 +116,12 @@ pub trait Backend {
 
     /// Panels/docks, in global coordinates.
     fn obstacles(&self) -> &[WindowRect];
+
+    /// Visible app windows on the current workspace, bottom-most first.
+    fn windows(&self) -> &[AppWindow];
+
+    /// Ids of app windows that exist but are hidden (minimized, other workspace).
+    fn hidden_windows(&self) -> &[u64];
 
     /// Show the next frame on output `output`. Scenes are incremental: they
     /// clear and redraw only what changed since the previous frame for this

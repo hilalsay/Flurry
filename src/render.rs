@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Transform};
 
-use crate::geom::Rect;
+use crate::geom::{subtract, Rect};
 use crate::sim::flakes::{Flake, Layer};
 use crate::sim::piles::{Surface, SurfaceKey, COL_W};
 use crate::sim::World;
@@ -234,9 +234,14 @@ impl Renderer {
     }
 
     fn place(&self, f: &Flake, output: Rect) -> SpriteDraw {
-        let (ix, qx) = quantise(f.x - output.x as f32);
-        let (iy, qy) = quantise(f.y - output.y as f32);
-        let sprite = sprite_index(f.layer, bucket(f.r), qx, qy);
+        self.place_at(f.x, f.y, f.r, f.layer, output)
+    }
+
+    /// The sprite for a disc of radius `r` centred at global (`x`, `y`).
+    fn place_at(&self, x: f32, y: f32, r: f32, layer: Layer, output: Rect) -> SpriteDraw {
+        let (ix, qx) = quantise(x - output.x as f32);
+        let (iy, qy) = quantise(y - output.y as f32);
+        let sprite = sprite_index(layer, bucket(r), qx, qy);
         let half = self.sheet.get(sprite).half;
         SpriteDraw {
             sprite,
@@ -266,6 +271,8 @@ pub struct PileDraw {
     pub base_y: f32,
     /// Height per column (each `COL_W` wide).
     pub heights: Vec<f32>,
+    /// Windows/panels stacked above this pile: don't draw there.
+    pub holes: Vec<Rect>,
 }
 
 impl PileDraw {
@@ -287,11 +294,13 @@ impl PileDraw {
     }
 }
 
-/// One output's pile changes: clear `clear`, then draw `piles` clipped to it.
+/// One output's top-layer changes: clear `clear`, then draw `piles` (each
+/// clipped to `clear` minus its holes), then the flying snow `draws`.
 #[derive(Debug, Clone, Default)]
 pub struct PileScene {
     pub clear: Vec<Rect>,
     pub piles: Vec<PileDraw>,
+    pub draws: Vec<SpriteDraw>,
 }
 
 #[derive(Debug, Clone)]
@@ -299,15 +308,28 @@ struct Drawn {
     x0: f32,
     y: f32,
     heights: Vec<f32>,
+    holes: Vec<Rect>,
     /// Output-local area last drawn.
     area: Rect,
 }
 
 /// Remembers what each output's piles window shows, to redraw only changes.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PileTracker {
     drawn: HashMap<SurfaceKey, Drawn>,
     full: bool,
+    /// Flying snow, tracked like flakes.
+    particles: Damage,
+}
+
+impl Default for PileTracker {
+    fn default() -> Self {
+        Self {
+            drawn: HashMap::new(),
+            full: false,
+            particles: Damage::new(0, 0),
+        }
+    }
 }
 
 impl PileTracker {
@@ -316,6 +338,16 @@ impl PileTracker {
         self.full = true;
         self.drawn.clear();
     }
+}
+
+/// Occluders above surface `s` that overlap `area` (both output-local).
+fn holes_for(world: &World, s: &Surface, area: Rect, output: Rect) -> Vec<Rect> {
+    world
+        .occluders()
+        .filter(|(z, _)| *z > s.z)
+        .map(|(_, r)| Rect::new(r.x - output.x, r.y - output.y, r.w, r.h))
+        .filter_map(|r| r.intersect(&area))
+        .collect()
 }
 
 /// The output-local rect that columns `c0..c1` of `s` may draw into.
@@ -365,8 +397,14 @@ impl Renderer {
                 continue;
             }
             seen.insert(s.key.clone());
+            let holes = holes_for(world, s, whole, output);
             let span = match tracker.drawn.get_mut(&s.key) {
-                Some(d) if d.x0 == s.x0 && d.y == s.y && d.heights.len() == s.heights.len() => {
+                Some(d)
+                    if d.x0 == s.x0
+                        && d.y == s.y
+                        && d.heights.len() == s.heights.len()
+                        && d.holes == holes =>
+                {
                     let span = changed_span(s, &d.heights);
                     if let Some((a, b)) = span {
                         d.heights[a..b].copy_from_slice(&s.heights[a..b]);
@@ -384,6 +422,7 @@ impl Renderer {
                             x0: s.x0,
                             y: s.y,
                             heights: s.heights.clone(),
+                            holes,
                             area: whole,
                         },
                     );
@@ -405,7 +444,38 @@ impl Renderer {
             }
             keep
         });
+        self.particle_draws(world, output, &mut tracker.particles, scene);
         self.pile_draws(world, output, scene);
+    }
+
+    /// Flying snow as near-layer sprites; their damage joins `scene.clear`.
+    fn particle_draws(
+        &self,
+        world: &World,
+        output: Rect,
+        damage: &mut Damage,
+        scene: &mut PileScene,
+    ) {
+        if (damage.w, damage.h) != (output.w, output.h) {
+            *damage = Damage::new(output.w, output.h);
+        }
+        // Only tiles that had or have a particle, never the whole screen.
+        damage.full = false;
+        damage.cur.fill(false);
+        scene.draws.clear();
+        let (w, h) = (output.w as i32, output.h as i32);
+        for p in world.particles().iter() {
+            let draw = self.place_at(p.x, p.y, p.radius(), Layer::Near, output);
+            let size = self.sheet.get(draw.sprite).size as i32;
+            if draw.x + size <= 0 || draw.y + size <= 0 || draw.x >= w || draw.y >= h {
+                continue;
+            }
+            damage.mark(draw.x, draw.y, draw.x + size, draw.y + size);
+            scene.draws.push(draw);
+        }
+        damage.compute_rects();
+        scene.clear.extend_from_slice(&damage.rects);
+        std::mem::swap(&mut damage.prev, &mut damage.cur);
     }
 
     /// Every pile part that overlaps a cleared rect (they will be clipped).
@@ -423,10 +493,13 @@ impl Renderer {
                 if c0 >= c1 {
                     continue;
                 }
+                let max_h = world.params().max_pile_height;
+                let whole = pile_area(s, 0, s.heights.len(), max_h, output);
                 let draw = PileDraw {
                     x0: s.x0 + c0 as f32 * COL_W - output.x as f32,
                     base_y: s.y - output.y as f32,
                     heights: s.heights[c0..c1].to_vec(),
+                    holes: holes_for(world, s, whole, output),
                 };
                 if draw.visible() {
                     scene.piles.push(draw);
@@ -445,8 +518,9 @@ impl Renderer {
         for r in &scene.clear {
             target.clear(r);
         }
-        let clip = clip_mask(&scene.clear, pixmap.width(), pixmap.height());
+        let (pw, ph) = (pixmap.width(), pixmap.height());
         for draw in &scene.piles {
+            let clip = clip_mask(&subtract(&scene.clear, &draw.holes), pw, ph);
             for (rgba, dy) in [(PILE_SHADOW, PILE_SHADOW_OFFSET), (PILE_FILL, 0.0)] {
                 let Some(path) = pile_path(draw, dy) else {
                     continue;
@@ -461,6 +535,14 @@ impl Renderer {
                     clip.as_ref(),
                 );
             }
+        }
+        let mut target = Target {
+            w: pw as i32,
+            h: ph as i32,
+            data: pixmap.data_mut(),
+        };
+        for d in &scene.draws {
+            target.blit(self.sheet.get(d.sprite), d.x, d.y);
         }
     }
 }
@@ -843,6 +925,7 @@ mod tests {
             x0: 10.0,
             base_y: 100.0,
             heights: vec![1.0, 3.0],
+            holes: Vec::new(),
         };
         assert_eq!(
             d.outline(),

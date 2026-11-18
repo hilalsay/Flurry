@@ -170,6 +170,8 @@ impl<'b> MainLoop<'b> {
         let inputs = Inputs {
             outputs: backend.outputs().to_vec(),
             obstacles: backend.obstacles().to_vec(),
+            windows: backend.windows().to_vec(),
+            hidden_windows: backend.hidden_windows().to_vec(),
             ..Inputs::default()
         };
         Self {
@@ -201,6 +203,7 @@ impl<'b> MainLoop<'b> {
                     BackendEvent::ObstaclesChanged => {
                         self.inputs.obstacles = self.backend.obstacles().to_vec();
                     }
+                    BackendEvent::WindowsChanged => self.windows_changed(),
                     BackendEvent::Redraw(i) => {
                         if let Some(s) = self.surfaces.get_mut(i) {
                             s.invalidate();
@@ -285,14 +288,25 @@ impl<'b> MainLoop<'b> {
 
     fn status(&self) -> String {
         format!(
-            "{} intensity={} fps={} flakes={} monitors={} panels={} snow={:.0}",
+            "{} intensity={} fps={} flakes={} monitors={} panels={} windows={} snow={:.0} \
+             on_windows={:.0} flying={}",
             if self.paused { "paused" } else { "running" },
             ipc::intensity_name(self.config.intensity),
             self.config.fps,
             self.world.flakes().len(),
             self.inputs.outputs.len(),
             self.inputs.obstacles.len(),
-            self.world.piles().volume()
+            self.inputs.windows.len(),
+            self.world.piles().volume().max(0.0),
+            self.world
+                .piles()
+                .surfaces()
+                .iter()
+                .filter(|s| matches!(s.key, crate::sim::piles::SurfaceKey::Window(_)))
+                .map(|s| s.volume())
+                .sum::<f32>()
+                .max(0.0),
+            self.world.particles().len()
         )
     }
 
@@ -381,9 +395,15 @@ impl<'b> MainLoop<'b> {
         Ok(())
     }
 
+    fn windows_changed(&mut self) {
+        self.inputs.windows = self.backend.windows().to_vec();
+        self.inputs.hidden_windows = self.backend.hidden_windows().to_vec();
+    }
+
     fn outputs_changed(&mut self) {
         self.inputs.outputs = self.backend.outputs().to_vec();
         self.inputs.obstacles = self.backend.obstacles().to_vec();
+        self.windows_changed();
         self.surfaces = surfaces_for(&self.inputs.outputs);
         for o in &self.inputs.outputs {
             log::debug!("output {}: {:?}", o.name, o.rect);

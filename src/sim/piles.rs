@@ -1,35 +1,54 @@
-//! Settled snow: one heightmap per surface (screen bottom, panel tops, and
-//! window tops from Phase 5). Columns are `COL_W` px wide; heights in px.
-//! Snow lands from flakes, slides downhill when too steep, and melts.
+//! Settled snow: one heightmap per surface (screen bottom, panel tops,
+//! window tops). Columns are `COL_W` px wide; heights in px. Snow lands
+//! from flakes and particles, slides downhill when too steep, creeps,
+//! melts, and falls off window edges. Window piles ride along with slow
+//! moves and are knocked off by fast ones.
 
 use std::collections::HashMap;
 
-use crate::geom::{Inputs, WindowRect};
+use crate::geom::{Inputs, Rect};
+use crate::sim::particles::{Particle, Particles, PARTICLE_VOLUME};
 
 /// Column width in px.
 pub const COL_W: f32 = 2.0;
 /// Neighbouring columns may differ by this much (px) before snow slides.
 const MAX_STEP: f32 = 1.0;
+/// Fraction of the excess moved per step (relaxation keeps it smooth).
+const SLUMP_RATE: f32 = 0.5;
 /// Snow creep per step: smooths small bumps (diffusion; must stay < 0.5).
 const CREEP: f32 = 0.06;
 /// A landed flake spreads its snow over ± this many radii.
 const SPREAD: f32 = 2.5;
-/// Fraction of the excess moved per step (relaxation keeps it smooth).
-const SLUMP_RATE: f32 = 0.5;
 /// Snow volume added per landed flake: π r² × this (px²).
 const FLAKE_GAIN: f32 = 1.2;
 /// Melting at `melt_rate = 1`: a constant part plus a part proportional
 /// to height, so tall piles shrink faster (px/s).
 const MELT_BASE: f32 = 0.012;
 const MELT_PER_PX: f32 = 0.0035;
+/// A window moving faster than this (px/s) throws its snow off.
+const KNOCK_SPEED: f32 = 300.0;
+/// Thrown snow keeps this share of the window's velocity.
+const KNOCK_CARRY: f32 = 0.9;
+
+/// Stacking depth of a surface: ground below every window, panels above.
+pub const Z_GROUND: i32 = -1;
+pub const Z_PANEL: i32 = i32::MAX;
 
 /// Identifies a surface across frames, so its snow survives layout changes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SurfaceKey {
     /// A stretch of a monitor's bottom edge not covered by a panel.
     Ground { output: String, segment: u32 },
-    /// The top edge of a panel/dock (by window id).
+    /// The top edge of a panel/dock.
     Obstacle(u64),
+    /// The top edge of an app window.
+    Window(u64),
+}
+
+impl SurfaceKey {
+    fn spills(&self) -> bool {
+        matches!(self, SurfaceKey::Window(_))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,19 +56,28 @@ pub struct Surface {
     pub key: SurfaceKey,
     /// Left edge, global px.
     pub x0: f32,
-    /// The line snow rests on (panel top, screen bottom), global px.
+    /// The line snow rests on (panel/window top, screen bottom), global px.
     pub y: f32,
+    /// Stacking depth: `Z_GROUND`, the window's stacking index, or `Z_PANEL`.
+    pub z: i32,
     /// Snow height per column, px.
     pub heights: Vec<f32>,
+    /// Sim time of the last move, for the window's velocity.
+    moved_at: f64,
+    /// Snow that slid over the left/right edge, not yet a particle (px²).
+    spill: [f32; 2],
 }
 
 impl Surface {
-    fn new(spec: &Spec) -> Surface {
+    fn new(spec: &Spec, now: f64) -> Surface {
         Surface {
             key: spec.key.clone(),
             x0: spec.x0,
             y: spec.y,
+            z: spec.z,
             heights: vec![0.0; columns(spec.x0, spec.x1)],
+            moved_at: now,
+            spill: [0.0; 2],
         }
     }
 
@@ -72,12 +100,11 @@ impl Surface {
         (c >= 0.0 && (c as usize) < self.heights.len()).then_some(c as usize)
     }
 
-    /// Move onto a new span, keeping the snow at the same global x.
-    fn refit(&mut self, spec: &Spec) {
+    /// Move onto a new span, keeping the snow at the same global x
+    /// (panels and ground: the snow stays put while the edge changes).
+    fn refit_in_place(&mut self, spec: &Spec) {
         let old = std::mem::take(&mut self.heights);
         let old_x0 = self.x0;
-        self.x0 = spec.x0;
-        self.y = spec.y;
         self.heights = (0..columns(spec.x0, spec.x1))
             .map(|c| {
                 let x = spec.x0 + c as f32 * COL_W;
@@ -89,12 +116,49 @@ impl Surface {
                 }
             })
             .collect();
+        (self.x0, self.y, self.z) = (spec.x0, spec.y, spec.z);
+    }
+
+    /// Move with the window, stretching the snow if the width changed.
+    fn refit_with_window(&mut self, spec: &Spec) {
+        let n = columns(spec.x0, spec.x1);
+        if n != self.heights.len() {
+            let old = std::mem::take(&mut self.heights);
+            let scale = old.len() as f32 / n as f32;
+            self.heights = (0..n)
+                .map(|c| old[((c as f32 + 0.5) * scale) as usize % old.len().max(1)])
+                .collect();
+        }
+        (self.x0, self.y, self.z) = (spec.x0, spec.y, spec.z);
+    }
+
+    /// Break all snow into particles moving at `v` (px/s), and clear it.
+    fn shatter(&mut self, v: (f32, f32), particles: &mut Particles) {
+        let mut acc = 0.0;
+        for (i, h) in self.heights.iter_mut().enumerate() {
+            acc += *h * COL_W;
+            if acc >= PARTICLE_VOLUME {
+                particles.spawn(
+                    Particle {
+                        x: self.x0 + (i as f32 + 0.5) * COL_W,
+                        y: self.y - *h * 0.5,
+                        vx: v.0,
+                        vy: v.1,
+                        volume: acc,
+                    },
+                    25.0 + 0.08 * (v.0.abs() + v.1.abs()),
+                );
+                acc = 0.0;
+            }
+            *h = 0.0;
+        }
     }
 
     /// Let snow slide between neighbours steeper than `MAX_STEP`, and creep
-    /// a little everywhere. The ends are walls (screen edges, panel ends),
-    /// so the volume is unchanged.
+    /// a little everywhere. Panel and ground ends are walls; window ends
+    /// spill (collected in `self.spill`). Inside, the volume is unchanged.
     fn slump(&mut self) {
+        let spills = self.key.spills();
         let h = &mut self.heights;
         let n = h.len();
         if n >= 3 {
@@ -113,6 +177,38 @@ impl Surface {
                 let m = (d.abs() - MAX_STEP) * 0.5 * SLUMP_RATE * d.signum();
                 h[i] -= m;
                 h[i + 1] += m;
+            }
+        }
+        if spills && n > 0 {
+            // Outside the window there is nothing: an edge column taller than
+            // `MAX_STEP` sheds its excess.
+            for (side, i) in [(0, 0), (1, n - 1)] {
+                if h[i] > MAX_STEP {
+                    let m = (h[i] - MAX_STEP) * 0.5 * SLUMP_RATE;
+                    h[i] -= m;
+                    self.spill[side] += m * COL_W;
+                }
+            }
+        }
+    }
+
+    /// Turn spilled snow into particles dropping off the edges.
+    fn emit_spill(&mut self, particles: &mut Particles) {
+        let edges = [self.x0 - 1.0, self.x1() + 1.0];
+        for side in 0..2 {
+            if self.spill[side] >= PARTICLE_VOLUME {
+                let i = if side == 0 { 0 } else { self.heights.len() - 1 };
+                particles.spawn(
+                    Particle {
+                        x: edges[side],
+                        y: self.y - self.heights[i] - 1.0,
+                        vx: if side == 0 { -20.0 } else { 20.0 },
+                        vy: 0.0,
+                        volume: self.spill[side],
+                    },
+                    8.0,
+                );
+                self.spill[side] = 0.0;
             }
         }
     }
@@ -135,12 +231,21 @@ struct Spec {
     x0: f32,
     x1: f32,
     y: f32,
+    z: i32,
+}
+
+/// A window pile set aside while its window is hidden.
+#[derive(Debug, Clone)]
+struct Parked {
+    surface: Surface,
+    since: f64,
 }
 
 /// All piles.
 #[derive(Debug, Clone, Default)]
 pub struct Piles {
     surfaces: Vec<Surface>,
+    parked: HashMap<u64, Parked>,
 }
 
 impl Piles {
@@ -148,7 +253,7 @@ impl Piles {
         &self.surfaces
     }
 
-    /// Total snow on all surfaces (px²).
+    /// Total snow on all visible surfaces (px²).
     pub fn volume(&self) -> f32 {
         self.surfaces.iter().map(Surface::volume).sum()
     }
@@ -156,36 +261,107 @@ impl Piles {
     pub fn clear(&mut self) {
         for s in &mut self.surfaces {
             s.heights.fill(0.0);
+            s.spill = [0.0; 2];
         }
+        self.parked.clear();
     }
 
-    /// Match the surfaces to the current monitors and panels, keeping the
-    /// snow of surfaces that still exist. Vanished surfaces lose their snow.
-    pub fn sync(&mut self, inputs: &Inputs, max_height: f32) {
+    /// Match the surfaces to the current monitors, panels and windows at sim
+    /// time `now`, keeping snow where surfaces persist:
+    /// - panels/ground keep snow at the same place while their edge changes;
+    /// - window piles ride along with slow moves, are thrown off by fast
+    ///   ones, and are stretched when the window is resized;
+    /// - a window that is hidden (minimized, other workspace) has its pile
+    ///   parked and restored (minus melting) when it comes back;
+    /// - a window that closed or stopped collecting (maximized) drops its
+    ///   snow as particles.
+    pub fn sync(
+        &mut self,
+        inputs: &Inputs,
+        max_height: f32,
+        melt_rate: f32,
+        now: f64,
+        particles: &mut Particles,
+    ) {
         let mut old: HashMap<SurfaceKey, Surface> = self
             .surfaces
             .drain(..)
             .map(|s| (s.key.clone(), s))
             .collect();
-        self.surfaces = specs(inputs, max_height)
-            .iter()
-            .map(|spec| match old.remove(&spec.key) {
-                Some(mut s) => {
-                    if (s.x0, s.x1(), s.y) != (spec.x0, spec.x1, spec.y) {
-                        s.refit(spec);
-                    }
-                    s
+        for spec in specs(inputs, max_height) {
+            let surface = match old.remove(&spec.key) {
+                Some(s) => self.follow(s, &spec, now, particles),
+                None => self.unpark(&spec, now, max_height, melt_rate),
+            };
+            self.surfaces.push(surface);
+        }
+        for (key, mut s) in old {
+            match key {
+                SurfaceKey::Window(id) if inputs.hidden_windows.contains(&id) => {
+                    self.parked.insert(
+                        id,
+                        Parked {
+                            surface: s,
+                            since: now,
+                        },
+                    );
                 }
-                None => Surface::new(spec),
-            })
-            .collect();
+                SurfaceKey::Window(_) => s.shatter((0.0, 0.0), particles),
+                _ => {} // a panel/ground stretch vanished: its snow goes with it
+            }
+        }
+        // Forget parked piles of windows that no longer exist at all.
+        let alive = |id: &u64| inputs.hidden_windows.contains(id);
+        self.parked.retain(|id, _| alive(id));
+    }
+
+    fn follow(&self, mut s: Surface, spec: &Spec, now: f64, particles: &mut Particles) -> Surface {
+        if (s.x0, s.x1(), s.y, s.z) == (spec.x0, spec.x1, spec.y, spec.z) {
+            return s;
+        }
+        if !s.key.spills() {
+            s.refit_in_place(spec);
+            return s;
+        }
+        let moved = (spec.x0 - s.x0, spec.y - s.y);
+        if moved != (0.0, 0.0) {
+            let dt = ((now - s.moved_at) as f32).max(1.0 / 60.0);
+            let v = (moved.0 / dt, moved.1 / dt);
+            if v.0.hypot(v.1) > KNOCK_SPEED {
+                s.shatter((v.0 * KNOCK_CARRY, v.1 * KNOCK_CARRY), particles);
+            }
+            s.moved_at = now;
+        }
+        s.refit_with_window(spec);
+        s
+    }
+
+    fn unpark(&mut self, spec: &Spec, now: f64, max_height: f32, melt_rate: f32) -> Surface {
+        let SurfaceKey::Window(id) = spec.key else {
+            return Surface::new(spec, now);
+        };
+        let Some(p) = self.parked.remove(&id) else {
+            return Surface::new(spec, now);
+        };
+        let mut s = p.surface;
+        // It kept melting while hidden.
+        s.melt((now - p.since) as f32, melt_rate, max_height);
+        s.refit_with_window(spec);
+        s.moved_at = now;
+        s
     }
 
     /// If a flake of radius `r` at `x` moving from `y_prev` to `y` (centre)
     /// reaches a pile, add its snow there and return true.
     pub fn try_land(&mut self, x: f32, y_prev: f32, y: f32, r: f32, max_height: f32) -> bool {
+        let volume = std::f32::consts::PI * r * r * FLAKE_GAIN;
+        self.land(x, y_prev, y, r, volume, max_height)
+    }
+
+    /// Like [`try_land`](Self::try_land) with an explicit snow `volume` (px²).
+    pub fn land(&mut self, x: f32, y_prev: f32, y: f32, r: f32, volume: f32, max_h: f32) -> bool {
         let (prev_bottom, bottom) = (y_prev + r, y + r);
-        // The first surface the flake meets on its way down.
+        // The first surface met on the way down.
         let mut hit: Option<(usize, f32)> = None;
         for (i, s) in self.surfaces.iter().enumerate() {
             let Some(c) = s.col(x) else { continue };
@@ -203,24 +379,25 @@ impl Piles {
         ) else {
             return false;
         };
-        // Triangle-shaped deposit centred on the flake.
+        // Triangle-shaped deposit centred on the landing point.
         let (x0, ramp) = (s.x0, reach + COL_W);
         let weight = |c: usize| {
             let cx = x0 + (c as f32 + 0.5) * COL_W;
             (1.0 - (cx - x).abs() / ramp).max(0.0)
         };
         let total: f32 = (c0..=c1).map(weight).sum::<f32>().max(1e-3);
-        let volume = std::f32::consts::PI * r * r * FLAKE_GAIN / COL_W;
+        let height = volume / COL_W;
         for (c, h) in s.heights.iter_mut().enumerate().take(c1 + 1).skip(c0) {
-            *h = (*h + volume * weight(c) / total).min(max_height);
+            *h = (*h + height * weight(c) / total).min(max_h);
         }
         true
     }
 
-    /// Slide and melt.
-    pub fn step(&mut self, dt: f32, melt_rate: f32, max_height: f32) {
+    /// Slide, spill and melt.
+    pub fn step(&mut self, dt: f32, melt_rate: f32, max_height: f32, particles: &mut Particles) {
         for s in &mut self.surfaces {
             s.slump();
+            s.emit_spill(particles);
             s.melt(dt, melt_rate, max_height);
         }
     }
@@ -228,23 +405,37 @@ impl Piles {
 
 /// Surfaces for the current layout:
 /// - each panel's top edge, if it has room above it on its monitor;
+/// - each collecting window's top edge, likewise;
 /// - each monitor's bottom edge, minus the stretches covered by panels
 ///   that sit on that edge.
 fn specs(inputs: &Inputs, max_height: f32) -> Vec<Spec> {
-    let mut specs = Vec::new();
-    for o in &inputs.obstacles {
-        let r = o.rect;
+    let room_above = |r: &Rect| {
         let cx = r.x + r.w as i32 / 2;
-        let room_above = inputs
+        inputs
             .outputs
             .iter()
-            .any(|out| out.rect.contains(cx, r.y) && r.y as f32 > out.rect.y as f32 + max_height);
-        if room_above && r.w > 0 {
+            .any(|out| out.rect.contains(cx, r.y) && r.y as f32 > out.rect.y as f32 + max_height)
+    };
+    let mut specs = Vec::new();
+    for o in &inputs.obstacles {
+        if o.rect.w > 0 && room_above(&o.rect) {
             specs.push(Spec {
                 key: SurfaceKey::Obstacle(o.id),
-                x0: r.x as f32,
-                x1: r.right() as f32,
-                y: r.y as f32,
+                x0: o.rect.x as f32,
+                x1: o.rect.right() as f32,
+                y: o.rect.y as f32,
+                z: Z_PANEL,
+            });
+        }
+    }
+    for (z, w) in inputs.windows.iter().enumerate() {
+        if w.collects && w.rect.w >= 8 && room_above(&w.rect) {
+            specs.push(Spec {
+                key: SurfaceKey::Window(w.id),
+                x0: w.rect.x as f32,
+                x1: w.rect.right() as f32,
+                y: w.rect.y as f32,
+                z: z as i32,
             });
         }
     }
@@ -253,7 +444,7 @@ fn specs(inputs: &Inputs, max_height: f32) -> Vec<Spec> {
         let mut covered: Vec<(i32, i32)> = inputs
             .obstacles
             .iter()
-            .map(|o: &WindowRect| o.rect)
+            .map(|o| o.rect)
             .filter(|r| r.y < bottom && r.bottom() >= bottom - 1)
             .map(|r| (r.x.max(out.rect.x), r.right().min(out.rect.right())))
             .filter(|(a, b)| a < b)
@@ -274,6 +465,7 @@ fn specs(inputs: &Inputs, max_height: f32) -> Vec<Spec> {
                     x0: x as f32,
                     x1: a as f32,
                     y: bottom as f32,
+                    z: Z_GROUND,
                 });
                 segment += 1;
             }
@@ -286,7 +478,7 @@ fn specs(inputs: &Inputs, max_height: f32) -> Vec<Spec> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geom::{OutputInfo, Rect};
+    use crate::geom::{AppWindow, OutputInfo, WindowRect};
 
     fn layout(panel: Option<Rect>) -> Inputs {
         Inputs {
@@ -304,6 +496,10 @@ mod tests {
     }
 
     const BOTTOM_PANEL: Rect = Rect::new(0, 1040, 1920, 40);
+
+    fn sync(p: &mut Piles, inputs: &Inputs, now: f64, parts: &mut Particles) {
+        p.sync(inputs, 40.0, 1.0, now, parts);
+    }
 
     #[test]
     fn bottom_panel_replaces_the_ground() {
@@ -333,7 +529,12 @@ mod tests {
 
     fn piles_with_panel() -> Piles {
         let mut p = Piles::default();
-        p.sync(&layout(Some(BOTTOM_PANEL)), 40.0);
+        sync(
+            &mut p,
+            &layout(Some(BOTTOM_PANEL)),
+            0.0,
+            &mut Particles::new(0),
+        );
         p
     }
 
@@ -352,14 +553,16 @@ mod tests {
         let mut p = piles_with_panel();
         p.surfaces[0].heights[300] = 35.0;
         let before = p.volume();
+        let mut parts = Particles::new(0);
         for _ in 0..5000 {
-            p.step(1.0 / 60.0, 0.0, 40.0);
+            p.step(1.0 / 60.0, 0.0, 40.0, &mut parts);
         }
         assert!(
             (p.volume() - before).abs() < 1e-2,
             "{} vs {before}",
             p.volume()
         );
+        assert!(parts.is_empty(), "panels don't spill");
         let h = &p.surfaces[0].heights;
         let steepest = h
             .windows(2)
@@ -373,21 +576,23 @@ mod tests {
         let mut p = piles_with_panel();
         p.surfaces[0].heights.fill(10.0);
         let before = p.volume();
+        let mut parts = Particles::new(0);
         for _ in 0..600 {
-            p.step(1.0 / 60.0, 1.0, 40.0);
+            p.step(1.0 / 60.0, 1.0, 40.0, &mut parts);
         }
         assert!(p.volume() < before);
-        p.step(1e6, 1.0, 40.0);
+        p.step(1e6, 1.0, 40.0, &mut parts);
         assert_eq!(p.volume(), 0.0);
     }
 
     #[test]
     fn height_never_exceeds_max() {
         let mut p = piles_with_panel();
+        let mut parts = Particles::new(0);
         for i in 0..20_000 {
             let x = 900.0 + (i % 40) as f32;
             p.try_land(x, 990.0, 1045.0, 4.0, 25.0);
-            p.step(1.0 / 60.0, 0.0, 25.0);
+            p.step(1.0 / 60.0, 0.0, 25.0, &mut parts);
         }
         assert!(p.surfaces[0].max_height() <= 25.0);
         assert!(p.surfaces[0].max_height() > 20.0);
@@ -396,15 +601,152 @@ mod tests {
     #[test]
     fn layout_changes_keep_snow() {
         let mut p = piles_with_panel();
+        let mut parts = Particles::new(0);
         p.surfaces[0].heights[100] = 12.0;
         // Panel grows taller: same surface, moved up.
-        p.sync(&layout(Some(Rect::new(0, 1030, 1920, 50))), 40.0);
+        sync(
+            &mut p,
+            &layout(Some(Rect::new(0, 1030, 1920, 50))),
+            1.0,
+            &mut parts,
+        );
         assert_eq!(p.surfaces().len(), 1);
         assert_eq!(p.surfaces[0].y, 1030.0);
         assert_eq!(p.surfaces[0].heights[100], 12.0);
         // Panel removed: its snow is gone, the ground appears.
-        p.sync(&layout(None), 40.0);
+        sync(&mut p, &layout(None), 2.0, &mut parts);
         assert!(matches!(p.surfaces[0].key, SurfaceKey::Ground { .. }));
         assert_eq!(p.volume(), 0.0);
+    }
+
+    fn with_window(rect: Rect, collects: bool) -> Inputs {
+        let mut i = layout(Some(BOTTOM_PANEL));
+        i.windows.push(AppWindow {
+            id: 42,
+            rect,
+            collects,
+        });
+        i
+    }
+
+    fn window_pile(p: &Piles) -> Option<&Surface> {
+        p.surfaces.iter().find(|s| s.key == SurfaceKey::Window(42))
+    }
+
+    fn snowy_window(p: &mut Piles, parts: &mut Particles) -> f32 {
+        sync(
+            p,
+            &with_window(Rect::new(400, 300, 600, 400), true),
+            0.0,
+            parts,
+        );
+        let s = p
+            .surfaces
+            .iter_mut()
+            .find(|s| s.key == SurfaceKey::Window(42))
+            .unwrap();
+        s.heights.fill(10.0);
+        s.volume()
+    }
+
+    #[test]
+    fn window_tops_collect_unless_maximized_or_too_high() {
+        let s = specs(&with_window(Rect::new(400, 300, 600, 400), true), 40.0);
+        assert!(s
+            .iter()
+            .any(|s| s.key == SurfaceKey::Window(42) && s.y == 300.0));
+        let s = specs(&with_window(Rect::new(400, 300, 600, 400), false), 40.0);
+        assert!(s.iter().all(|s| s.key != SurfaceKey::Window(42)));
+        let s = specs(&with_window(Rect::new(400, 20, 600, 400), true), 40.0);
+        assert!(
+            s.iter().all(|s| s.key != SurfaceKey::Window(42)),
+            "no room above"
+        );
+    }
+
+    #[test]
+    fn slow_moves_carry_snow_fast_moves_throw_it() {
+        let (mut p, mut parts) = (Piles::default(), Particles::new(0));
+        let vol = snowy_window(&mut p, &mut parts);
+        // 3 px in 1/30 s = 90 px/s: rides along.
+        sync(
+            &mut p,
+            &with_window(Rect::new(403, 300, 600, 400), true),
+            1.0 / 30.0,
+            &mut parts,
+        );
+        let s = window_pile(&p).unwrap();
+        assert_eq!(s.x0, 403.0);
+        assert!((s.volume() - vol).abs() < 1e-3);
+        assert!(parts.is_empty());
+        // 40 px in 1/30 s = 1200 px/s: thrown off to the right.
+        sync(
+            &mut p,
+            &with_window(Rect::new(443, 300, 600, 400), true),
+            2.0 / 30.0,
+            &mut parts,
+        );
+        assert_eq!(window_pile(&p).unwrap().volume(), 0.0);
+        assert!((parts.volume() - vol).abs() < PARTICLE_VOLUME + 1.0);
+        let mean_vx = parts.iter().map(|q| q.vx).sum::<f32>() / parts.len() as f32;
+        assert!(mean_vx > 500.0, "thrown with the window: {mean_vx}");
+    }
+
+    #[test]
+    fn maximize_drops_snow_minimize_parks_it() {
+        let (mut p, mut parts) = (Piles::default(), Particles::new(0));
+        let vol = snowy_window(&mut p, &mut parts);
+        // Minimized: parked, nothing falls.
+        let mut hidden = layout(Some(BOTTOM_PANEL));
+        hidden.hidden_windows.push(42);
+        sync(&mut p, &hidden, 10.0, &mut parts);
+        assert!(window_pile(&p).is_none());
+        assert!(parts.is_empty());
+        // Restored a minute later: back, minus a bit of melting.
+        sync(
+            &mut p,
+            &with_window(Rect::new(400, 300, 600, 400), true),
+            70.0,
+            &mut parts,
+        );
+        let back = window_pile(&p).unwrap().volume();
+        assert!(back < vol && back > vol * 0.3, "{back} of {vol}");
+        // Maximized: it all falls as particles.
+        sync(
+            &mut p,
+            &with_window(Rect::new(0, 0, 1920, 1040), false),
+            71.0,
+            &mut parts,
+        );
+        assert!(window_pile(&p).is_none());
+        assert!((parts.volume() - back).abs() < PARTICLE_VOLUME + 1.0);
+    }
+
+    #[test]
+    fn snow_spills_over_window_edges() {
+        let (mut p, mut parts) = (Piles::default(), Particles::new(0));
+        sync(
+            &mut p,
+            &with_window(Rect::new(400, 300, 600, 400), true),
+            0.0,
+            &mut parts,
+        );
+        let s = p
+            .surfaces
+            .iter_mut()
+            .find(|s| s.key == SurfaceKey::Window(42))
+            .unwrap();
+        s.heights[..10].fill(20.0);
+        let before = p.volume();
+        for _ in 0..600 {
+            p.step(1.0 / 60.0, 0.0, 40.0, &mut parts);
+        }
+        let lost = before - p.volume();
+        assert!(lost > PARTICLE_VOLUME, "only {lost} px² spilled");
+        assert!(!parts.is_empty());
+        assert!(
+            parts.iter().all(|q| q.x < 400.0),
+            "spilled off the left edge"
+        );
     }
 }

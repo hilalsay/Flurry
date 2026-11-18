@@ -106,3 +106,32 @@ decided and why.
   with flurry stopped. Reading the root window doesn't give the composited picture either. So the
   evidence on Cinnamon is the stacking order plus your manual check. `tests/x11_xvfb.rs` has the
   automated openbox test from the plan (it skips until Xvfb and openbox are installed).
+- **Phase 5: window list (X11).** A full pipelined query of `_NET_CLIENT_LIST_STACKING` (type,
+  state, desktop, `_NET_FRAME_EXTENTS`, `_GTK_FRAME_EXTENTS`, geometry, position, parent frame, and
+  then the frame geometry) takes two round trips. It runs at most every 100 ms when something
+  changed (stacking, active window, workspace, a client's state/desktop/extents via
+  `PropertyNotify`, map/unmap/destroy), and every 2 s regardless. **While a window is dragged**, its
+  position comes straight from the frame's `ConfigureNotify` (root `SubstructureNotify`) plus the
+  offset recorded at the last query, so piles follow every motion event without extra round trips.
+  Verified on Cinnamon: maximized windows are seen as non-collecting and minimized ones as hidden.
+  A live test window collected snow, and a fast scripted drag threw it off as particles that landed
+  on the panel.
+- **Phase 5: piles on windows.** Only normal (or untyped), visible, non-maximized, non-fullscreen
+  windows with ≥ `max_pile_height` px of room above collect snow. Window piles move with the window.
+  Moving faster than 300 px/s throws the snow off with 90% of the window's velocity. Resizing
+  stretches the snow. Snow taller than 1 px at a window edge slides off as particles. Closing or
+  maximizing drops the snow as particles. Minimizing or switching workspace parks the pile, and it
+  comes back minus the melting that happened meanwhile. Particles: gravity 520 px/s², drag 0.6/s,
+  ~36 px² each, at most 3000; they land on any pile below or vanish off-screen.
+- **Phase 5: occlusion.** Every pile is clipped by the windows stacked above it and by panels (XRender
+  clip = redrawn rects minus those windows). A surface is redrawn whenever the set of windows covering
+  it changes. Flying snow is drawn on top of everything. Landing is not occlusion-checked: snow can
+  settle on the hidden part of a covered window top and shows up once that part is uncovered.
+- **Phase 5: `layering = "mask"` implemented** (flakes on top, clipped away from app windows and
+  panels). It is also now the fallback when the WM won't keep the flakes window below apps, instead
+  of `front`.
+- **Phase 5 CPU:** the window tracking adds nothing measurable. Back to back with the Phase 4 build
+  (same desktop state, 30 fps, 8 s samples): Phase 4 flurry 1.6–1.7%, Xorg 7.2–8.6%; Phase 5 flurry
+  1.7–1.8%, Xorg 7.5–7.7%; cinnamon ≤ 1% for both. The Phase 4 table's lower Xorg figure (4.6%) was
+  taken under different desktop conditions. Today's total is about 9% of a core, under the 12% budget.
+- **Phase 5:** the KWin, Hyprland and Sway window providers stay in Phase 9 with the rest of Wayland.

@@ -320,7 +320,7 @@ The first instance owns the socket; later invocations send the command and exit.
 | 2 | X11 overlay | ✅ (manual check by me) |
 | 3 | Controls: tray, CLI/IPC, global hotkey | ✅ |
 | 4 | Two-window layering + piles on panel and screen bottom | ✅ (manual check by me) |
-| 5 | Piles on windows | |
+| 5 | Piles on windows | ✅ (manual check by me) |
 | 6 | Snowballs and snowman | |
 | 7 | Being a good citizen (auto-pause, battery, autostart) | |
 | 8 | Signature features (§12) | |
@@ -356,7 +356,7 @@ The first instance owns the socket; later invocations send the command and exit.
 - ✅ Flakes pass behind apps; snow settles on the panel and screen bottom, forms slopes, melts; `flurry clear` empties it; desktop icons still clickable. CPU numbers at 30/60 fps in `DECISIONS.md`.
 
 ### Phase 5 — Piles on windows
-- X11 window list with stacking, frame extents and workspace filtering (§6 "Cinnamon specifics").
+- X11 window list with stacking, frame extents and workspace filtering (§6 "Cinnamon specifics"). The KWin/Hyprland/Sway providers are in Phase 9.
 - Window drag → snow flies off with the window's velocity; maximize/close → snow falls; covered parts hidden.
 - ✅ Snow collects on non-maximized window tops; dragging a window throws its snow; overlapping windows look correct; nothing collects on maximized/minimized windows or other workspaces.
 

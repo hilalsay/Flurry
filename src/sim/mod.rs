@@ -2,13 +2,15 @@
 //! Must not import from `platform`, `tray` or `ipc` (PLAN.md §4).
 
 pub mod flakes;
+pub mod particles;
 pub mod piles;
 pub mod snowballs;
 
 use crate::config::Config;
-use crate::geom::{Inputs, OutputInfo, Rect, WindowRect};
+use crate::geom::{AppWindow, Inputs, OutputInfo, Rect, WindowRect};
 use flakes::{Flakes, Wind};
-use piles::Piles;
+use particles::Particles;
+use piles::{Piles, Z_PANEL};
 
 /// Screen area that `flake_count` refers to. Bigger or more monitors get
 /// proportionally more flakes so the snow looks equally dense everywhere.
@@ -53,8 +55,29 @@ pub struct World {
     bounds: Option<Rect>,
     screen_area: f64,
     piles: Piles,
-    /// Output rects and obstacles the piles were last synced to.
-    layout: (Vec<Rect>, Vec<WindowRect>),
+    particles: Particles,
+    /// The layout the piles were last synced to.
+    layout: Layout,
+}
+
+/// Everything about the screen layout that affects piles.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Layout {
+    outputs: Vec<Rect>,
+    obstacles: Vec<WindowRect>,
+    windows: Vec<AppWindow>,
+    hidden: Vec<u64>,
+}
+
+impl Layout {
+    fn of(inputs: &Inputs) -> Layout {
+        Layout {
+            outputs: inputs.outputs.iter().map(|o| o.rect).collect(),
+            obstacles: inputs.obstacles.clone(),
+            windows: inputs.windows.clone(),
+            hidden: inputs.hidden_windows.clone(),
+        }
+    }
 }
 
 impl World {
@@ -68,8 +91,24 @@ impl World {
             bounds: None,
             screen_area: 0.0,
             piles: Piles::default(),
-            layout: Default::default(),
+            particles: Particles::new(seed ^ 0x5DEE_CE66_D1CE_4E5B),
+            layout: Layout::default(),
         }
+    }
+
+    /// Snow in flight (knocked or spilled off windows).
+    pub fn particles(&self) -> &Particles {
+        &self.particles
+    }
+
+    /// Rects that hide piles below them, with their stacking depth (a pile
+    /// is hidden by occluders with a greater depth): app windows by
+    /// stacking index, panels on top.
+    pub fn occluders(&self) -> impl Iterator<Item = (i32, Rect)> + '_ {
+        let windows = self.layout.windows.iter().enumerate();
+        windows
+            .map(|(z, w)| (z as i32, w.rect))
+            .chain(self.layout.obstacles.iter().map(|o| (Z_PANEL, o.rect)))
     }
 
     pub fn piles(&self) -> &Piles {
@@ -109,6 +148,7 @@ impl World {
     /// Remove all settled snow (piles, snowballs). Falling flakes keep falling.
     pub fn clear_settled(&mut self) {
         self.piles.clear();
+        self.particles.clear();
     }
 
     /// Advance the simulation by `dt` seconds.
@@ -134,14 +174,24 @@ impl World {
             &bounds,
             |f, y_before| f.layer.collides() && piles.try_land(f.x, y_before, f.y, f.r, max_h),
         );
-        self.piles.step(dt, self.params.melt_rate, max_h);
+        self.particles.step(dt, &bounds, |p, y_before| {
+            piles.land(p.x, y_before, p.y, p.radius(), p.volume, max_h)
+        });
+        self.piles
+            .step(dt, self.params.melt_rate, max_h, &mut self.particles);
     }
 
     fn sync_piles(&mut self, inputs: &Inputs) {
-        let outputs: Vec<Rect> = inputs.outputs.iter().map(|o| o.rect).collect();
-        if self.layout.0 != outputs || self.layout.1 != inputs.obstacles {
-            self.piles.sync(inputs, self.params.max_pile_height);
-            self.layout = (outputs, inputs.obstacles.clone());
+        let layout = Layout::of(inputs);
+        if self.layout != layout {
+            self.piles.sync(
+                inputs,
+                self.params.max_pile_height,
+                self.params.melt_rate,
+                self.time,
+                &mut self.particles,
+            );
+            self.layout = layout;
         }
     }
 

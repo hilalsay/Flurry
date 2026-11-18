@@ -54,11 +54,21 @@ pub struct OutputInfo {
     pub scale: f32,
 }
 
-/// A toplevel window. `Inputs::windows` is ordered bottom-most first.
+/// A panel/dock (or any window) and where it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowRect {
     pub id: u64,
     pub rect: Rect,
+}
+
+/// A visible app window on the current workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppWindow {
+    pub id: u64,
+    /// The visible frame (title bar included, invisible shadows excluded).
+    pub rect: Rect,
+    /// Snow may settle on its top edge (normal, not maximized/fullscreen).
+    pub collects: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -74,17 +84,59 @@ pub struct CursorState {
 #[derive(Debug, Clone, Default)]
 pub struct Inputs {
     pub outputs: Vec<OutputInfo>,
-    /// Stacking order: top-most window last.
-    pub windows: Vec<WindowRect>,
+    /// Visible app windows in stacking order, top-most last.
+    pub windows: Vec<AppWindow>,
+    /// Windows that exist but are hidden (minimized, other workspace).
+    pub hidden_windows: Vec<u64>,
     /// Panels, docks, taskbars (id = window id).
     pub obstacles: Vec<WindowRect>,
     /// `None` when the backend cannot see the cursor (most Wayland desktops).
     pub cursor: Option<CursorState>,
 }
 
+/// `rects` minus `holes`, as non-overlapping rects.
+pub fn subtract(rects: &[Rect], holes: &[Rect]) -> Vec<Rect> {
+    let mut out: Vec<Rect> = rects.iter().copied().filter(|r| !r.is_empty()).collect();
+    for hole in holes {
+        let mut next = Vec::with_capacity(out.len());
+        for r in out {
+            let Some(i) = r.intersect(hole) else {
+                next.push(r);
+                continue;
+            };
+            // Up to four pieces: above, below, left, right of the hole.
+            let pieces = [
+                Rect::new(r.x, r.y, r.w, (i.y - r.y) as u32),
+                Rect::new(r.x, i.bottom(), r.w, (r.bottom() - i.bottom()) as u32),
+                Rect::new(r.x, i.y, (i.x - r.x) as u32, i.h),
+                Rect::new(i.right(), i.y, (r.right() - i.right()) as u32, i.h),
+            ];
+            next.extend(pieces.into_iter().filter(|p| !p.is_empty()));
+        }
+        out = next;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subtract_cuts_holes() {
+        let r = Rect::new(0, 0, 10, 10);
+        assert_eq!(subtract(&[r], &[]), [r]);
+        assert!(subtract(&[r], &[Rect::new(-5, -5, 20, 20)]).is_empty());
+        let parts = subtract(&[r], &[Rect::new(3, 3, 4, 4)]);
+        let area: u32 = parts.iter().map(|p| p.w * p.h).sum();
+        assert_eq!(area, 100 - 16);
+        for (i, a) in parts.iter().enumerate() {
+            assert!(a.intersect(&Rect::new(3, 3, 4, 4)).is_none());
+            for b in &parts[i + 1..] {
+                assert!(a.intersect(b).is_none());
+            }
+        }
+    }
 
     #[test]
     fn intersect_overlapping() {

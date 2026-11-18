@@ -28,8 +28,8 @@ use x11rb::protocol::render::{
 use x11rb::protocol::shape::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ChangeWindowAttributesAux, ClipOrdering, ColormapAlloc, ConfigureWindowAux,
-    ConnectionExt as _, CreateWindowAux, EventMask, GrabMode, Keycode, MapState, ModMask, PropMode,
-    Rectangle, Screen, StackMode, VisualClass, Visualid, Window, WindowClass,
+    ConnectionExt as _, CreateWindowAux, EventMask, GetPropertyReply, GrabMode, Keycode, MapState,
+    ModMask, PropMode, Rectangle, Screen, StackMode, VisualClass, Visualid, Window, WindowClass,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
@@ -37,7 +37,7 @@ use x11rb::wrapper::ConnectionExt as _;
 
 use super::{filter_outputs, Backend, BackendEvent, BackendOptions, Frame, Hotkey};
 use crate::config::Layering;
-use crate::geom::{OutputInfo, Rect, WindowRect};
+use crate::geom::{subtract, AppWindow, OutputInfo, Rect, WindowRect};
 use crate::render::{
     layer_rgb, PileDraw, PileScene, SpriteDraw, SpriteSheet, PILE_FILL, PILE_SHADOW,
     PILE_SHADOW_OFFSET,
@@ -71,8 +71,38 @@ x11rb::atom_manager! {
         _NET_CLIENT_LIST_STACKING,
         _NET_WORKAREA,
         _NET_CURRENT_DESKTOP,
+        _NET_ACTIVE_WINDOW,
+        _NET_WM_WINDOW_TYPE_NORMAL,
+        _NET_WM_STATE_MAXIMIZED_VERT,
+        _NET_WM_STATE_MAXIMIZED_HORZ,
+        _NET_WM_STATE_FULLSCREEN,
+        _NET_WM_STATE_HIDDEN,
+        _NET_FRAME_EXTENTS,
+        _GTK_FRAME_EXTENTS,
     }
 }
+
+/// An app window as tracked between full queries.
+#[derive(Debug, Clone, Copy)]
+struct Client {
+    id: Window,
+    /// The window whose ConfigureNotify moves it: the WM's frame, or the
+    /// client itself when unframed (e.g. GTK client-side decorations).
+    frame: Window,
+    /// Visible frame rect, root coordinates.
+    rect: Rect,
+    /// `rect` position minus the frame window's position, and the frame's
+    /// size minus `rect`'s size: constant while the window is dragged.
+    offset: (i32, i32),
+    size_delta: (i32, i32),
+    /// Mapped, not minimized, on the current workspace.
+    visible: bool,
+    collects: bool,
+}
+
+/// Re-query the window list at least this often, and at most this often.
+const WINDOW_POLL: Duration = Duration::from_secs(2);
+const WINDOW_MIN_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Ids for panels derived from the work area (Cinnamon draws its panels
 /// inside the shell, so they are not X windows): base + output * 4 + edge.
@@ -100,6 +130,8 @@ enum Mode {
     Desktop,
     /// Flakes and piles both in override-redirect windows on top.
     Front,
+    /// Like `Front`, but flakes are clipped away from app windows.
+    Mask,
 }
 
 impl Mode {
@@ -108,12 +140,7 @@ impl Mode {
             Layering::Auto | Layering::TwoWindow => Mode::TwoWindow,
             Layering::Desktop => Mode::Desktop,
             Layering::Front => Mode::Front,
-            Layering::Mask => {
-                log::warn!(
-                    "layering = \"mask\" needs the window list (phase 5); using \"front\" for now"
-                );
-                Mode::Front
-            }
+            Layering::Mask => Mode::Mask,
         }
     }
 }
@@ -148,6 +175,9 @@ struct Pending {
     outputs_changed: bool,
     hotkey: bool,
     docks_changed: bool,
+    /// The window list needs a full re-query / a frame moved.
+    windows_dirty: bool,
+    windows_moved: bool,
     redraw: Vec<usize>,
 }
 
@@ -179,6 +209,13 @@ pub struct X11Backend {
     /// fighting with.
     raises: (Option<Instant>, HashMap<Window, u32>),
     ignored: HashSet<Window>,
+    /// App windows, bottom-most first.
+    clients: Vec<Client>,
+    windows: Vec<AppWindow>,
+    hidden: Vec<u64>,
+    /// Clients we receive PropertyNotify from.
+    watched: HashSet<Window>,
+    windows_queried: Option<Instant>,
 }
 
 impl X11Backend {
@@ -253,6 +290,11 @@ impl X11Backend {
             last_hotkey: None,
             raises: (None, HashMap::new()),
             ignored: HashSet::new(),
+            clients: Vec::new(),
+            windows: Vec::new(),
+            hidden: Vec::new(),
+            watched: HashSet::new(),
+            windows_queried: None,
         };
         if let Some(hk) = opts.hotkey {
             backend.hotkey = backend.grab_hotkey(hk)?;
@@ -261,6 +303,7 @@ impl X11Backend {
         backend.create_surfaces()?;
         backend.docks = backend.query_docks()?;
         backend.docks_queried = Some(Instant::now());
+        backend.refresh_windows()?;
         Ok(backend)
     }
 
@@ -345,7 +388,7 @@ impl X11Backend {
     fn create_surfaces(&mut self) -> Result<()> {
         let rects: Vec<Rect> = self.outputs.iter().map(|o| o.rect).collect();
         for rect in rects {
-            let managed = self.mode != Mode::Front;
+            let managed = !self.is_overlay_mode();
             let flakes = self.create_win(rect, managed, "flurry flakes")?;
             let piles = match self.mode {
                 Mode::Desktop => None,
@@ -355,7 +398,7 @@ impl X11Backend {
         }
         self.restack()?;
         self.conn.flush()?;
-        if self.mode != Mode::Front {
+        if !self.is_overlay_mode() {
             self.layering_check_at = Some(Instant::now() + LAYERING_CHECK_AFTER);
         }
         Ok(())
@@ -526,7 +569,7 @@ impl X11Backend {
     /// right under the piles window.
     fn restack(&self) -> Result<()> {
         for s in &self.surfaces {
-            if self.mode == Mode::Front {
+            if self.is_overlay_mode() {
                 self.raise(s.flakes.window)?;
             }
             if let Some(p) = s.piles {
@@ -565,10 +608,14 @@ impl X11Backend {
         self.surface_of(window).is_some()
     }
 
+    fn is_overlay_mode(&self) -> bool {
+        matches!(self.mode, Mode::Front | Mode::Mask)
+    }
+
     fn is_top_window(&self, window: Window) -> bool {
         self.surfaces.iter().any(|s| {
             s.piles.is_some_and(|p| p.window == window)
-                || (self.mode == Mode::Front && s.flakes.window == window)
+                || (self.is_overlay_mode() && s.flakes.window == window)
         })
     }
 
@@ -770,12 +817,184 @@ impl X11Backend {
         }
         log::warn!(
             "the window manager doesn't keep the flakes window below apps; \
-             falling back to layering = \"front\" (snow over windows)"
+             falling back to layering = \"mask\" (flakes on top, cut out around windows)"
         );
         self.destroy_surfaces()?;
-        self.mode = Mode::Front;
+        self.mode = Mode::Mask;
         self.create_surfaces()?;
         Ok(true)
+    }
+
+    /// Full query of all app windows (pipelined: two round trips in total).
+    fn query_clients(&mut self) -> Result<Vec<Client>> {
+        let a = self.atoms;
+        let current = self
+            .cardinals(self.root, a._NET_CURRENT_DESKTOP)?
+            .first()
+            .copied()
+            .unwrap_or(0);
+        let stacking: Vec<Window> = self
+            .window_list(a._NET_CLIENT_LIST_STACKING)?
+            .into_iter()
+            .filter(|w| !self.is_ours(*w))
+            .collect();
+        let types = self.window_types(&stacking)?;
+        let c = &self.conn;
+        let mut pending = Vec::new();
+        for &w in &stacking {
+            let prop = |atom: Atom, ty: AtomEnum| c.get_property(false, w, atom, ty, 0, 64);
+            pending.push((
+                prop(a._NET_WM_STATE, AtomEnum::ATOM)?,
+                prop(a._NET_WM_DESKTOP, AtomEnum::CARDINAL)?,
+                prop(a._NET_FRAME_EXTENTS, AtomEnum::CARDINAL)?,
+                prop(a._GTK_FRAME_EXTENTS, AtomEnum::CARDINAL)?,
+                c.get_window_attributes(w)?,
+                c.get_geometry(w)?,
+                c.translate_coordinates(w, self.root, 0, 0)?,
+                c.query_tree(w)?,
+            ));
+        }
+        let values = |r: Result<GetPropertyReply, _>| -> Vec<u32> {
+            r.ok()
+                .and_then(|r| r.value32().map(|v| v.collect()))
+                .unwrap_or_default()
+        };
+        let mut clients = Vec::new();
+        for ((&w, ty), (state, desk, fext, gext, attrs, geom, pos, tree)) in
+            stacking.iter().zip(&types).zip(pending)
+        {
+            let (Ok(attrs), Ok(geom), Ok(pos), Ok(tree)) =
+                (attrs.reply(), geom.reply(), pos.reply(), tree.reply())
+            else {
+                continue; // closed meanwhile
+            };
+            if ty.contains(&a._NET_WM_WINDOW_TYPE_DESKTOP)
+                || ty.contains(&a._NET_WM_WINDOW_TYPE_DOCK)
+            {
+                continue;
+            }
+            let state = values(state.reply());
+            let desktop = values(desk.reply()).first().copied().unwrap_or(current);
+            let elsewhere = desktop != current && desktop != 0xFFFF_FFFF;
+            let visible = attrs.map_state == MapState::VIEWABLE
+                && !state.contains(&a._NET_WM_STATE_HIDDEN)
+                && !elsewhere;
+            let maximized = state.contains(&a._NET_WM_STATE_MAXIMIZED_VERT)
+                && state.contains(&a._NET_WM_STATE_MAXIMIZED_HORZ);
+            let fullscreen = state.contains(&a._NET_WM_STATE_FULLSCREEN);
+            let normal = ty.is_empty() || ty.contains(&a._NET_WM_WINDOW_TYPE_NORMAL);
+            let client = Rect::new(
+                pos.dst_x.into(),
+                pos.dst_y.into(),
+                geom.width.into(),
+                geom.height.into(),
+            );
+            let framed = tree.parent != self.root && tree.parent != x11rb::NONE;
+            clients.push(Client {
+                id: w,
+                frame: if framed { tree.parent } else { w },
+                rect: visible_rect(client, &values(fext.reply()), &values(gext.reply())),
+                offset: (0, 0),
+                size_delta: (0, 0),
+                visible,
+                collects: visible && normal && !maximized && !fullscreen,
+            });
+        }
+        // Second pass: the geometry ConfigureNotify will report for each
+        // frame, to follow windows while they are dragged.
+        let cookies = clients
+            .iter()
+            .map(|c| self.conn.get_geometry(c.frame))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (client, cookie) in clients.iter_mut().zip(cookies) {
+            if let Ok(g) = cookie.reply() {
+                client.offset = (
+                    client.rect.x - i32::from(g.x),
+                    client.rect.y - i32::from(g.y),
+                );
+                client.size_delta = (
+                    i32::from(g.width) - client.rect.w as i32,
+                    i32::from(g.height) - client.rect.h as i32,
+                );
+            }
+        }
+        // Get PropertyNotify (state, workspace, extents) from new clients.
+        for c in &clients {
+            if self.watched.insert(c.id) {
+                self.conn.change_window_attributes(
+                    c.id,
+                    &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+                )?;
+            }
+        }
+        let alive: HashSet<Window> = clients.iter().map(|c| c.id).collect();
+        self.watched.retain(|w| alive.contains(w));
+        Ok(clients)
+    }
+
+    fn cardinals(&self, window: Window, atom: Atom) -> Result<Vec<u32>> {
+        let r = self
+            .conn
+            .get_property(false, window, atom, AtomEnum::CARDINAL, 0, 1024)?
+            .reply()?;
+        Ok(r.value32().map(|v| v.collect()).unwrap_or_default())
+    }
+
+    /// Rebuild the public window lists from `clients`. Returns true if changed.
+    fn publish_windows(&mut self) -> bool {
+        let windows: Vec<AppWindow> = self
+            .clients
+            .iter()
+            .filter(|c| c.visible)
+            .map(|c| AppWindow {
+                id: c.id.into(),
+                rect: c.rect,
+                collects: c.collects,
+            })
+            .collect();
+        let hidden: Vec<u64> = self
+            .clients
+            .iter()
+            .filter(|c| !c.visible)
+            .map(|c| c.id.into())
+            .collect();
+        let changed = windows != self.windows || hidden != self.hidden;
+        (self.windows, self.hidden) = (windows, hidden);
+        changed
+    }
+
+    fn refresh_windows(&mut self) -> Result<bool> {
+        self.windows_queried = Some(Instant::now());
+        self.clients = self.query_clients()?;
+        let changed = self.publish_windows();
+        if changed {
+            for c in &self.clients {
+                log::debug!(
+                    "window {:#x}: {:?} visible={} collects={}",
+                    c.id,
+                    c.rect,
+                    c.visible,
+                    c.collects
+                );
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Fast path while dragging: a frame moved or resized.
+    fn frame_configured(&mut self, frame: Window, x: i16, y: i16, w: u16, h: u16) -> bool {
+        let Some(c) = self.clients.iter_mut().find(|c| c.frame == frame) else {
+            return false;
+        };
+        let rect = Rect::new(
+            i32::from(x) + c.offset.0,
+            i32::from(y) + c.offset.1,
+            (i32::from(w) - c.size_delta.0).max(1) as u32,
+            (i32::from(h) - c.size_delta.1).max(1) as u32,
+        );
+        let changed = rect != c.rect;
+        c.rect = rect;
+        changed
     }
 
     // ----- hotkey -----------------------------------------------------------
@@ -854,6 +1073,9 @@ impl X11Backend {
                     p.raise_for.push(e.window);
                 }
                 p.docks_changed |= is_dock(e.window);
+                p.windows_moved |= self.frame_configured(e.window, e.x, e.y, e.width, e.height);
+                // The stacking may have changed too.
+                p.windows_dirty |= self.clients.iter().any(|c| c.frame == e.window);
             }
             Event::MapNotify(e) if !self.is_ours(e.window) => {
                 // New windows map on top.
@@ -861,21 +1083,37 @@ impl X11Backend {
                     p.raise_for.push(e.window);
                 }
                 p.docks_changed = true;
+                p.windows_dirty = true;
             }
             Event::UnmapNotify(e) if !self.is_ours(e.window) => {
                 p.docks_changed |= is_dock(e.window);
+                p.windows_dirty = true;
             }
+            Event::DestroyNotify(e) if !self.is_ours(e.window) => p.windows_dirty = true,
             Event::CirculateNotify(e) if !self.is_ours(e.window) => {
                 if !self.ignored.contains(&e.window) {
                     p.raise_for.push(e.window);
                 }
             }
             Event::PropertyNotify(e) if e.window == self.root => {
+                let a = &self.atoms;
                 // Client list, work area, or current desktop (per-desktop work areas).
-                p.docks_changed |= [
-                    self.atoms._NET_CLIENT_LIST,
-                    self.atoms._NET_WORKAREA,
-                    self.atoms._NET_CURRENT_DESKTOP,
+                p.docks_changed |=
+                    [a._NET_CLIENT_LIST, a._NET_WORKAREA, a._NET_CURRENT_DESKTOP].contains(&e.atom);
+                p.windows_dirty |= [
+                    a._NET_CLIENT_LIST_STACKING,
+                    a._NET_CURRENT_DESKTOP,
+                    a._NET_ACTIVE_WINDOW,
+                ]
+                .contains(&e.atom);
+            }
+            Event::PropertyNotify(e) => {
+                let a = &self.atoms;
+                p.windows_dirty |= [
+                    a._NET_WM_STATE,
+                    a._NET_WM_DESKTOP,
+                    a._NET_FRAME_EXTENTS,
+                    a._GTK_FRAME_EXTENTS,
                 ]
                 .contains(&e.atom);
             }
@@ -1089,7 +1327,12 @@ impl X11Backend {
     }
 
     /// Clear the scene's rects and redraw the piles there, clipped to them.
-    fn draw_piles(&mut self, picture: render::Picture, scene: &PileScene) -> Result<()> {
+    fn draw_piles(
+        &mut self,
+        picture: render::Picture,
+        scene: &PileScene,
+        sheet: &SpriteSheet,
+    ) -> Result<()> {
         if scene.clear.is_empty() {
             return Ok(());
         }
@@ -1102,7 +1345,25 @@ impl X11Backend {
             .render_set_picture_clip_rectangles(picture, 0, 0, &self.rects)?;
         self.clear(picture, &scene.clear)?;
         let max_points = self.max_request_items(8);
+        // The clip is the cleared area; piles with windows above them are
+        // clipped further so they stay hidden behind those windows.
+        let mut clipped = false;
         for draw in &scene.piles {
+            if !draw.holes.is_empty() {
+                let open = subtract(&scene.clear, &draw.holes);
+                if open.is_empty() {
+                    continue;
+                }
+                self.set_rects(&open);
+                self.conn
+                    .render_set_picture_clip_rectangles(picture, 0, 0, &self.rects)?;
+                clipped = true;
+            } else if clipped {
+                self.set_rects(&scene.clear);
+                self.conn
+                    .render_set_picture_clip_rectangles(picture, 0, 0, &self.rects)?;
+                clipped = false;
+            }
             for (src, dy) in [(shadow, PILE_SHADOW_OFFSET), (fill, 0.0)] {
                 strip_points(draw, dy, &mut self.points);
                 // Overlapping chunks (by 2 points) keep the strip continuous.
@@ -1122,10 +1383,38 @@ impl X11Backend {
                 }
             }
         }
+        // Flying snow goes on top of everything.
+        if !scene.draws.is_empty() {
+            if clipped {
+                self.set_rects(&scene.clear);
+                self.conn
+                    .render_set_picture_clip_rectangles(picture, 0, 0, &self.rects)?;
+            }
+            self.draw_sprites(picture, &scene.draws, sheet)?;
+        }
         self.conn
             .render_change_picture(picture, &ChangePictureAux::new().clipmask(x11rb::NONE))?;
         Ok(())
     }
+}
+
+/// The visible part of a client at `client` (root coords): add the WM's
+/// decorations (`_NET_FRAME_EXTENTS`), drop GTK's invisible client-side
+/// shadow margins (`_GTK_FRAME_EXTENTS`). Both are left, right, top, bottom.
+fn visible_rect(client: Rect, frame: &[u32], gtk: &[u32]) -> Rect {
+    let get = |v: &[u32], i: usize| v.get(i).copied().unwrap_or(0) as i32;
+    let (l, r, t, b) = (
+        get(frame, 0) - get(gtk, 0),
+        get(frame, 1) - get(gtk, 1),
+        get(frame, 2) - get(gtk, 2),
+        get(frame, 3) - get(gtk, 3),
+    );
+    Rect::new(
+        client.x - l,
+        client.y - t,
+        (client.w as i32 + l + r).max(1) as u32,
+        (client.h as i32 + t + b).max(1) as u32,
+    )
 }
 
 impl Backend for X11Backend {
@@ -1141,6 +1430,14 @@ impl Backend for X11Backend {
         &self.docks
     }
 
+    fn windows(&self) -> &[AppWindow] {
+        &self.windows
+    }
+
+    fn hidden_windows(&self) -> &[u64] {
+        &self.hidden
+    }
+
     fn present(&mut self, output: usize, frame: &Frame) -> Result<()> {
         if self.paints.is_none() {
             self.paints = Some(self.create_paints(frame.sprites)?);
@@ -1152,10 +1449,32 @@ impl Backend for X11Backend {
         let (flakes, piles) = (s.flakes.picture, s.piles.map(|p| p.picture));
         if !frame.flakes.clear.is_empty() || !frame.flakes.draws.is_empty() {
             self.clear(flakes, &frame.flakes.clear)?;
+            let masked = self.mode == Mode::Mask;
+            if masked {
+                // Flakes only where no app window or panel is.
+                let o = self.outputs.get(output).map(|o| o.rect).unwrap_or_default();
+                let holes: Vec<Rect> = self
+                    .windows
+                    .iter()
+                    .map(|w| w.rect)
+                    .chain(self.docks.iter().map(|d| d.rect))
+                    .map(|r| Rect::new(r.x - o.x, r.y - o.y, r.w, r.h))
+                    .collect();
+                let open = subtract(&[Rect::new(0, 0, o.w, o.h)], &holes);
+                self.set_rects(&open);
+                self.conn
+                    .render_set_picture_clip_rectangles(flakes, 0, 0, &self.rects)?;
+            }
             self.draw_sprites(flakes, &frame.flakes.draws, frame.sprites)?;
+            if masked {
+                self.conn.render_change_picture(
+                    flakes,
+                    &ChangePictureAux::new().clipmask(x11rb::NONE),
+                )?;
+            }
         }
         if let Some(piles) = piles {
-            self.draw_piles(piles, frame.piles)?;
+            self.draw_piles(piles, frame.piles, frame.sprites)?;
         }
         // One round trip per frame: back-pressure if the server falls behind.
         self.conn.get_input_focus()?.reply()?;
@@ -1192,6 +1511,17 @@ impl Backend for X11Backend {
             // ping-pong us into a busy loop.
             self.restack()?;
             self.conn.flush()?;
+        }
+        let since = self.windows_queried.map_or(WINDOW_POLL, |t| now - t);
+        let requery =
+            (p.windows_dirty || rebuilt) && since >= WINDOW_MIN_INTERVAL || since >= WINDOW_POLL;
+        let windows_changed = if requery {
+            self.refresh_windows()?
+        } else {
+            p.windows_moved && self.publish_windows()
+        };
+        if windows_changed {
+            events.push(BackendEvent::WindowsChanged);
         }
         let since = self.docks_queried.map_or(DOCK_POLL, |t| now - t);
         let due = (p.docks_changed || rebuilt) && since >= DOCK_MIN_INTERVAL || since >= DOCK_POLL;
@@ -1352,11 +1682,27 @@ mod tests {
     }
 
     #[test]
+    fn visible_rect_adds_frame_and_drops_gtk_shadow() {
+        let client = Rect::new(100, 100, 400, 300);
+        // Server-side decorations: 1 px borders, 30 px title bar.
+        assert_eq!(
+            visible_rect(client, &[1, 1, 30, 1], &[]),
+            Rect::new(99, 70, 402, 331)
+        );
+        // GTK CSD: no WM frame, 20 px invisible shadow (26 at the bottom).
+        assert_eq!(
+            visible_rect(client, &[0, 0, 0, 0], &[20, 20, 20, 26]),
+            Rect::new(120, 120, 360, 254)
+        );
+    }
+
+    #[test]
     fn pile_strip_alternates_base_and_top() {
         let draw = PileDraw {
             x0: 0.0,
             base_y: 10.0,
             heights: vec![2.0],
+            holes: Vec::new(),
         };
         let mut pts = Vec::new();
         strip_points(&draw, 0.0, &mut pts);
