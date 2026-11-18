@@ -69,6 +69,8 @@ pub struct AppWindow {
     pub rect: Rect,
     /// Snow may settle on its top edge (normal, not maximized/fullscreen).
     pub collects: bool,
+    /// The owning process (`_NET_WM_PID`), if known.
+    pub pid: Option<u32>,
 }
 
 /// The mouse pointer, global coordinates.
@@ -89,6 +91,8 @@ pub struct Inputs {
     pub windows: Vec<AppWindow>,
     /// Windows that exist but are hidden (minimized, other workspace).
     pub hidden_windows: Vec<u64>,
+    /// CPU load of each window's program (1.0 = one core), by window id.
+    pub window_heat: std::collections::HashMap<u64, f32>,
     /// Panels, docks, taskbars (id = window id).
     pub obstacles: Vec<WindowRect>,
     /// `None` when the backend cannot see the cursor (most Wayland desktops).

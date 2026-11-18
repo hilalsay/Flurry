@@ -73,6 +73,22 @@ impl Monitors {
     }
 }
 
+/// The signature features (PLAN.md §12). `[features]` in the config file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Features {
+    /// Windows whose programs use a lot of CPU melt their snow faster.
+    pub hot_apps_melt: bool,
+}
+
+impl Default for Features {
+    fn default() -> Self {
+        Self {
+            hot_apps_melt: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -94,6 +110,7 @@ pub struct Config {
     pub layering: Layering,
     /// Global toggle hotkey, e.g. `"super+shift+s"`; empty disables it.
     pub hotkey: String,
+    pub features: Features,
 }
 
 impl Default for Config {
@@ -113,6 +130,7 @@ impl Default for Config {
             monitors: Monitors::All(AllMarker::All),
             layering: Layering::Auto,
             hotkey: "super+shift+s".into(),
+            features: Features::default(),
         }
     }
 }
@@ -211,6 +229,14 @@ mod tests {
         assert_eq!(cfg.intensity, Intensity::Heavy);
         assert_eq!(cfg.effective_flake_count(), 300);
         assert_eq!(cfg.layering, Layering::TwoWindow);
+    }
+
+    #[test]
+    fn features_table() {
+        let cfg = Config::from_toml("[features]\nhot_apps_melt = false\n").unwrap();
+        assert!(!cfg.features.hot_apps_melt);
+        assert!(Config::default().features.hot_apps_melt);
+        assert!(Config::from_toml("[features]\nnope = true\n").is_err());
     }
 
     #[test]

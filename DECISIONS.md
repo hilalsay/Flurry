@@ -182,3 +182,10 @@ decided and why.
 - **Phase 7:** New dependency **`zbus`** (planned in §3; already built by ksni, same 5.19 version
   with `async-io` + `blocking-api`, so nothing new to compile). BadWindow X errors from windows
   closing between queries are logged at debug, not warn.
+- **Phase 8 / feature 1, hot apps melt** (`features.hot_apps_melt = true`). Window PIDs come from
+  `_NET_WM_PID`. Once a second, while some window collects snow, flurry reads `/proc/*/stat` and
+  sums the CPU use of each window's process **and all its descendants**, so a terminal running a
+  compiler counts as hot. Above 0.15 cores a window's snow melts (1 + 25 × load) times faster and
+  drips (≈ 6 drips/s per core). The planned "heat shimmer" isn't drawn: a distortion effect would need
+  the pixels behind the window, which a click-through overlay doesn't have. The drips carry the
+  effect instead.

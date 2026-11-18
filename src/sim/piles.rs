@@ -29,6 +29,12 @@ const MELT_PER_PX: f32 = 0.0035;
 const KNOCK_SPEED: f32 = 300.0;
 /// Thrown snow keeps this share of the window's velocity.
 const KNOCK_CARRY: f32 = 0.9;
+/// A window using one full core melts its snow this many times faster.
+const HEAT_MELT: f32 = 25.0;
+/// Below this load a window counts as cold.
+const HEAT_MIN: f32 = 0.15;
+/// Drips per second from a pile on a window using one full core.
+const DRIPS_PER_LOAD: f32 = 6.0;
 
 /// Stacking depth of a surface: ground below every window, panels above.
 pub const Z_GROUND: i32 = -1;
@@ -247,12 +253,24 @@ struct Parked {
 }
 
 /// All piles.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Piles {
     surfaces: Vec<Surface>,
     parked: HashMap<u64, Parked>,
     /// Window piles thrown off in the last `sync`, with the window's velocity.
     knocked: Vec<(SurfaceKey, (f32, f32))>,
+    rng: fastrand::Rng,
+}
+
+impl Default for Piles {
+    fn default() -> Self {
+        Self {
+            surfaces: Vec::new(),
+            parked: HashMap::new(),
+            knocked: Vec::new(),
+            rng: fastrand::Rng::with_seed(0x51EE7),
+        }
+    }
 }
 
 impl Piles {
@@ -432,12 +450,44 @@ impl Piles {
         true
     }
 
-    /// Slide, spill and melt.
-    pub fn step(&mut self, dt: f32, melt_rate: f32, max_height: f32, particles: &mut Particles) {
+    /// Slide, spill and melt. `heat` (window id → CPU load) makes busy
+    /// windows melt faster and drip.
+    pub fn step(
+        &mut self,
+        dt: f32,
+        melt_rate: f32,
+        max_height: f32,
+        particles: &mut Particles,
+        heat: &HashMap<u64, f32>,
+    ) {
         for s in &mut self.surfaces {
             s.slump();
             s.emit_spill(particles);
-            s.melt(dt, melt_rate, max_height);
+            let load = match s.key {
+                SurfaceKey::Window(id) => heat.get(&id).copied().unwrap_or(0.0),
+                _ => 0.0,
+            };
+            if load < HEAT_MIN {
+                s.melt(dt, melt_rate, max_height);
+                continue;
+            }
+            s.melt(dt, melt_rate * (1.0 + HEAT_MELT * load), max_height);
+            // Meltwater drips off the front edge.
+            if self.rng.f32() < DRIPS_PER_LOAD * load.min(4.0) * dt {
+                let c = self.rng.usize(..s.heights.len());
+                if s.heights[c] > 0.5 {
+                    particles.spawn(
+                        Particle {
+                            x: s.x0 + (c as f32 + 0.5) * COL_W,
+                            y: s.y + 2.0,
+                            vx: 0.0,
+                            vy: 30.0,
+                            volume: 2.0,
+                        },
+                        2.0,
+                    );
+                }
+            }
         }
     }
 }
@@ -624,7 +674,7 @@ mod tests {
         let before = p.volume();
         let mut parts = Particles::new(0);
         for _ in 0..5000 {
-            p.step(1.0 / 60.0, 0.0, 40.0, &mut parts);
+            p.step(1.0 / 60.0, 0.0, 40.0, &mut parts, &HashMap::new());
         }
         assert!(
             (p.volume() - before).abs() < 1e-2,
@@ -647,10 +697,10 @@ mod tests {
         let before = p.volume();
         let mut parts = Particles::new(0);
         for _ in 0..600 {
-            p.step(1.0 / 60.0, 1.0, 40.0, &mut parts);
+            p.step(1.0 / 60.0, 1.0, 40.0, &mut parts, &HashMap::new());
         }
         assert!(p.volume() < before);
-        p.step(1e6, 1.0, 40.0, &mut parts);
+        p.step(1e6, 1.0, 40.0, &mut parts, &HashMap::new());
         assert_eq!(p.volume(), 0.0);
     }
 
@@ -661,7 +711,7 @@ mod tests {
         for i in 0..20_000 {
             let x = 900.0 + (i % 40) as f32;
             p.try_land(x, 990.0, 1045.0, 4.0, 25.0);
-            p.step(1.0 / 60.0, 0.0, 25.0, &mut parts);
+            p.step(1.0 / 60.0, 0.0, 25.0, &mut parts, &HashMap::new());
         }
         assert!(p.surfaces[0].max_height() <= 25.0);
         assert!(p.surfaces[0].max_height() > 20.0);
@@ -694,6 +744,7 @@ mod tests {
             id: 42,
             rect,
             collects,
+            pid: None,
         });
         i
     }
@@ -792,6 +843,27 @@ mod tests {
     }
 
     #[test]
+    fn hot_windows_melt_faster_and_drip() {
+        let melt_for = |load: f32| {
+            let (mut p, mut parts) = (Piles::default(), Particles::new(0));
+            let before = snowy_window(&mut p, &mut parts);
+            let heat = HashMap::from([(42u64, load)]);
+            for _ in 0..600 {
+                p.step(1.0 / 60.0, 1.0, 40.0, &mut parts, &heat);
+            }
+            (before - window_pile(&p).unwrap().volume(), parts.len())
+        };
+        let (cold, cold_drips) = melt_for(0.0);
+        let (hot, hot_drips) = melt_for(1.0);
+        assert!(hot > cold * 5.0, "hot {hot} vs cold {cold}");
+        // Both spill over the edges; the hot one also drips.
+        assert!(
+            hot_drips > cold_drips,
+            "{hot_drips} vs {cold_drips} particles"
+        );
+    }
+
+    #[test]
     fn snow_spills_over_window_edges() {
         let (mut p, mut parts) = (Piles::default(), Particles::new(0));
         sync(
@@ -808,7 +880,7 @@ mod tests {
         s.heights[..10].fill(20.0);
         let before = p.volume();
         for _ in 0..600 {
-            p.step(1.0 / 60.0, 0.0, 40.0, &mut parts);
+            p.step(1.0 / 60.0, 0.0, 40.0, &mut parts, &HashMap::new());
         }
         let lost = before - p.volume();
         assert!(lost > PARTICLE_VOLUME, "only {lost} px² spilled");

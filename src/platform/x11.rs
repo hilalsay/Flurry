@@ -79,6 +79,7 @@ x11rb::atom_manager! {
         _NET_WM_STATE_HIDDEN,
         _NET_FRAME_EXTENTS,
         _GTK_FRAME_EXTENTS,
+        _NET_WM_PID,
     }
 }
 
@@ -99,6 +100,7 @@ struct Client {
     visible: bool,
     collects: bool,
     fullscreen: bool,
+    pid: Option<u32>,
 }
 
 /// Re-query the window list at least this often, and at most this often.
@@ -874,6 +876,7 @@ impl X11Backend {
                 prop(a._NET_WM_DESKTOP, AtomEnum::CARDINAL)?,
                 prop(a._NET_FRAME_EXTENTS, AtomEnum::CARDINAL)?,
                 prop(a._GTK_FRAME_EXTENTS, AtomEnum::CARDINAL)?,
+                prop(a._NET_WM_PID, AtomEnum::CARDINAL)?,
                 c.get_window_attributes(w)?,
                 c.get_geometry(w)?,
                 c.translate_coordinates(w, self.root, 0, 0)?,
@@ -886,7 +889,7 @@ impl X11Backend {
                 .unwrap_or_default()
         };
         let mut clients = Vec::new();
-        for ((&w, ty), (state, desk, fext, gext, attrs, geom, pos, tree)) in
+        for ((&w, ty), (state, desk, fext, gext, pid, attrs, geom, pos, tree)) in
             stacking.iter().zip(&types).zip(pending)
         {
             let (Ok(attrs), Ok(geom), Ok(pos), Ok(tree)) =
@@ -925,6 +928,7 @@ impl X11Backend {
                 visible,
                 collects: visible && normal && !maximized && !fullscreen,
                 fullscreen: visible && fullscreen,
+                pid: values(pid.reply()).first().copied().filter(|&p| p > 0),
             });
         }
         // Second pass: the geometry ConfigureNotify will report for each
@@ -977,6 +981,7 @@ impl X11Backend {
                 id: c.id.into(),
                 rect: c.rect,
                 collects: c.collects,
+                pid: c.pid,
             })
             .collect();
         let hidden: Vec<u64> = self

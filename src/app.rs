@@ -25,6 +25,8 @@ const MAX_CATCH_UP: Duration = Duration::from_millis(250);
 const MAX_WAIT: Duration = Duration::from_millis(100);
 /// Log frame timings this often at debug level.
 const STATS_EVERY: Duration = Duration::from_secs(10);
+/// How often to sample each window's CPU load (hot apps melt).
+const HEAT_POLL: Duration = Duration::from_secs(1);
 /// How often to check whether we run on battery.
 const BATTERY_POLL: Duration = Duration::from_secs(10);
 const POWER_SUPPLY: &str = "/sys/class/power_supply";
@@ -154,6 +156,8 @@ struct MainLoop<'b> {
     showing: bool,
     on_battery: bool,
     battery_checked: Option<Instant>,
+    heat: crate::heat::Heat,
+    heat_sampled: Option<Instant>,
     commands: Receiver<Request>,
     tray: Option<Tray>,
     stats: Stats,
@@ -222,6 +226,8 @@ impl<'b> MainLoop<'b> {
             showing: true,
             on_battery: false,
             battery_checked: None,
+            heat: crate::heat::Heat::new(),
+            heat_sampled: None,
             commands,
             tray,
             stats: Stats::default(),
@@ -241,6 +247,7 @@ impl<'b> MainLoop<'b> {
                 return Ok(());
             }
             self.check_battery();
+            self.sample_heat();
             let now = Instant::now();
             if !self.showing {
                 // Resume without a jump in the simulation.
@@ -312,6 +319,24 @@ impl<'b> MainLoop<'b> {
             self.update_visibility()?;
         }
         Ok(())
+    }
+
+    /// Feature "hot apps melt": CPU load of each visible window's program.
+    fn sample_heat(&mut self) {
+        let wanted = self.config.features.hot_apps_melt
+            && self.showing
+            && self.inputs.windows.iter().any(|w| w.collects);
+        if !wanted || self.heat_sampled.is_some_and(|t| t.elapsed() < HEAT_POLL) {
+            return;
+        }
+        self.heat_sampled = Some(Instant::now());
+        self.heat.sample();
+        self.inputs.window_heat = self
+            .inputs
+            .windows
+            .iter()
+            .filter_map(|w| Some((w.id, self.heat.of(w.pid?))))
+            .collect();
     }
 
     fn check_battery(&mut self) {

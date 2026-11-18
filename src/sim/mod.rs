@@ -29,6 +29,8 @@ pub struct SimParams {
     /// Snowballs and the cursor (`interaction` in the config).
     pub interaction: bool,
     pub carry_modifier: CarryModifier,
+    /// Feature: busy windows melt their snow faster.
+    pub hot_apps_melt: bool,
 }
 
 impl SimParams {
@@ -41,6 +43,7 @@ impl SimParams {
             melt_rate: c.melt_rate,
             interaction: c.interaction,
             carry_modifier: c.carry_modifier,
+            hot_apps_melt: c.features.hot_apps_melt,
         }
     }
 }
@@ -201,8 +204,14 @@ impl World {
         self.particles.step(dt, &bounds, |p, y_before| {
             piles.land(p.x, y_before, p.y, p.radius(), p.volume, max_h)
         });
+        let no_heat = std::collections::HashMap::new();
+        let heat = if self.params.hot_apps_melt {
+            &inputs.window_heat
+        } else {
+            &no_heat
+        };
         self.piles
-            .step(dt, self.params.melt_rate, max_h, &mut self.particles);
+            .step(dt, self.params.melt_rate, max_h, &mut self.particles, heat);
         let mut env = Env {
             dt,
             now: self.time,

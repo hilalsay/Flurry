@@ -6,6 +6,7 @@ pub mod autostart;
 pub mod cli;
 pub mod config;
 pub mod geom;
+pub mod heat;
 pub mod ipc;
 pub mod platform;
 pub mod power;
