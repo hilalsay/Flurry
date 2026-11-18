@@ -1566,6 +1566,9 @@ impl X11Backend {
         if !scene.draws.is_empty() {
             self.draw_sprites(picture, &scene.draws, sheet)?;
         }
+        if !scene.frost.is_empty() {
+            self.draw_sprites(picture, &scene.frost, sheet)?;
+        }
         if let Some(paints) = &self.paints {
             for d in &scene.images {
                 let Some(&(src, w, h)) = paints.images.get(d.image as usize) else {

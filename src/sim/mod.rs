@@ -2,6 +2,7 @@
 //! Must not import from `platform`, `tray` or `ipc` (PLAN.md §4).
 
 pub mod flakes;
+pub mod frost;
 pub mod icicles;
 pub mod particles;
 pub mod piles;
@@ -36,6 +37,8 @@ pub struct SimParams {
     pub icicles: bool,
     /// Feature: typing shakes snow off the focused window.
     pub typing_shakes_snow: bool,
+    /// Feature: frost when idle, after this many seconds (`None` = off).
+    pub frost_after: Option<f32>,
 }
 
 impl SimParams {
@@ -51,6 +54,10 @@ impl SimParams {
             hot_apps_melt: c.features.hot_apps_melt,
             icicles: c.features.icicles,
             typing_shakes_snow: c.features.typing_shakes_snow,
+            frost_after: c
+                .features
+                .frost
+                .then_some(c.features.frost_idle_minutes.max(0.0) * 60.0),
         }
     }
 }
@@ -74,6 +81,7 @@ pub struct World {
     particles: Particles,
     snowfolk: Snowfolk,
     icicles: icicles::Icicles,
+    frost: frost::Frost,
     /// The layout the piles were last synced to.
     layout: Layout,
 }
@@ -112,8 +120,14 @@ impl World {
             particles: Particles::new(seed ^ 0x5DEE_CE66_D1CE_4E5B),
             snowfolk: Snowfolk::default(),
             icicles: icicles::Icicles::default(),
+            frost: frost::Frost::default(),
             layout: Layout::default(),
         }
+    }
+
+    /// Frosted cells (feature 4).
+    pub fn frost(&self) -> impl Iterator<Item = frost::FrostCell> + '_ {
+        self.frost.cells()
     }
 
     /// Hanging and falling icicles.
@@ -195,6 +209,7 @@ impl World {
         self.particles.clear();
         self.snowfolk.clear();
         self.icicles.clear();
+        self.frost.clear();
     }
 
     /// Advance the simulation by `dt` seconds.
@@ -251,6 +266,10 @@ impl World {
         if self.params.icicles {
             self.icicles
                 .step(dt, inputs, &mut self.piles, &mut self.particles, bounds);
+        }
+        match self.params.frost_after {
+            Some(after) => self.frost.step(dt, &inputs.outputs, inputs.cursor, after),
+            None => self.frost.clear(),
         }
     }
 

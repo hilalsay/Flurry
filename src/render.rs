@@ -94,7 +94,83 @@ pub struct SpriteSheet {
     sprites: Vec<Sprite>,
 }
 
+/// Frost crystal sprites: needle direction × 2 branch patterns × level.
+const FROST_VARIANTS: usize = crate::sim::frost::ORIENTATIONS as usize * 2;
+
+/// A frost tile: a haze that thickens with density, a needle crossing the
+/// whole cell in direction `orient`, and side needles at ±60° (more and
+/// longer per level). Needles reach the cell edges, so neighbouring cells
+/// with similar directions join into longer streaks.
+fn frost_sprite(variant: usize, level: u8) -> Sprite {
+    use crate::sim::frost::{CELL, ORIENTATIONS};
+    let (orient, pattern) = (variant / 2, variant % 2);
+    let size = CELL as u32;
+    let mut pm = Pixmap::new(size, size).unwrap_or_else(|| unreachable!("12x12 pixmap"));
+    let c = size as f32 / 2.0;
+    let a = orient as f32 * std::f32::consts::PI / ORIENTATIONS as f32;
+    let (dx, dy) = (a.cos(), a.sin());
+    let reach = c * 1.5; // past the cell edge; clipped by the pixmap
+    let mut pb = PathBuilder::new();
+    pb.move_to(c - dx * reach, c - dy * reach);
+    pb.line_to(c + dx * reach, c + dy * reach);
+    let side = c * (0.3 + 0.14 * level as f32);
+    // Pattern 0: paired branches; pattern 1: alternating single branches.
+    for k in 0..level.min(3) {
+        let t = (k as f32 - 1.0) * c * 0.6 + pattern as f32 * c * 0.3;
+        let (px, py) = (c + dx * t, c + dy * t);
+        let turns: &[f32] = if pattern == 0 {
+            &[1.05, -1.05]
+        } else if k % 2 == 0 {
+            &[1.05]
+        } else {
+            &[-1.05]
+        };
+        for turn in turns {
+            let b = a + turn;
+            let len = side * (1.0 - 0.25 * pattern as f32 * k as f32);
+            pb.move_to(px, py);
+            pb.line_to(px + b.cos() * len, py + b.sin() * len);
+        }
+    }
+    let ink = (110 + 35 * level as u32).min(240) as u8;
+    if let Some(path) = pb.finish() {
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(255, 255, 255, ink);
+        let stroke = tiny_skia::Stroke {
+            width: 0.8,
+            ..tiny_skia::Stroke::default()
+        };
+        pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+    // Icy haze, like a fogged window: barely there at the frosty front.
+    let haze = [0u8, 6, 20, 34, 48][level as usize % 5];
+    let rgb = layer_rgb(Layer::Far);
+    let alpha: Vec<u8> = pm.data().chunks(4).map(|p| p[3].max(haze)).collect();
+    let rgba = alpha
+        .iter()
+        .flat_map(|&a| {
+            let [r, g, b] = rgb.map(|c| mul_div255(c, a));
+            [r, g, b, a]
+        })
+        .collect();
+    Sprite {
+        size,
+        layer: Layer::Far,
+        half: 0,
+        alpha,
+        rgba,
+    }
+}
+
 impl SpriteSheet {
+    /// The frost crystal sprite for `variant` (any number) at `level` 1..=LEVELS.
+    pub fn frost(&self, variant: u8, level: u8) -> u32 {
+        let flakes = Layer::ALL.len() * BUCKETS * SUBPIXEL * SUBPIXEL;
+        let levels = crate::sim::frost::LEVELS as usize;
+        let l = (level.clamp(1, crate::sim::frost::LEVELS) - 1) as usize;
+        (flakes + (variant as usize % FROST_VARIANTS) * levels + l) as u32
+    }
+
     fn new() -> Self {
         let mut sprites = Vec::with_capacity(Layer::ALL.len() * BUCKETS * SUBPIXEL * SUBPIXEL);
         let s = SUBPIXEL as f32;
@@ -106,6 +182,11 @@ impl SpriteSheet {
                         sprites.push(Sprite::new(r, layer, qx as f32 / s, qy as f32 / s));
                     }
                 }
+            }
+        }
+        for v in 0..FROST_VARIANTS {
+            for level in 1..=crate::sim::frost::LEVELS {
+                sprites.push(frost_sprite(v, level));
             }
         }
         Self { sprites }
@@ -346,6 +427,8 @@ pub struct PileScene {
     pub draws: Vec<SpriteDraw>,
     pub images: Vec<ImageDraw>,
     pub icicles: Vec<IcicleDraw>,
+    /// Frost crystals, drawn last (frost is on the glass, in front).
+    pub frost: Vec<SpriteDraw>,
 }
 
 /// Draw image `image` of the [`ImageSheet`] with its top-left at (`x`, `y`).
@@ -435,6 +518,8 @@ pub struct PileTracker {
     images: Vec<(ImageDraw, Rect)>,
     /// Icicles on screen: id → (rounded shape, output-local rect).
     icicles: HashMap<u64, ((i32, i32, i32), Rect)>,
+    /// Frost on screen: cell (global x, y) → sprite.
+    frost: HashMap<(i32, i32), u32>,
 }
 
 impl Default for PileTracker {
@@ -445,6 +530,7 @@ impl Default for PileTracker {
             particles: Damage::new(0, 0),
             images: Vec::new(),
             icicles: HashMap::new(),
+            frost: HashMap::new(),
         }
     }
 }
@@ -456,6 +542,7 @@ impl PileTracker {
         self.drawn.clear();
         self.images.clear();
         self.icicles.clear();
+        self.frost.clear();
     }
 }
 
@@ -566,7 +653,61 @@ impl Renderer {
         self.particle_draws(world, output, &mut tracker.particles, scene);
         self.image_draws(world, output, tracker, scene);
         self.icicle_draws(world, output, tracker, scene);
+        self.frost_draws(world, output, tracker, scene);
         self.pile_draws(world, output, scene);
+    }
+
+    /// Frost: clear cells whose level changed, then redraw every frosted
+    /// cell that any cleared rect touches.
+    fn frost_draws(
+        &self,
+        world: &World,
+        output: Rect,
+        tracker: &mut PileTracker,
+        scene: &mut PileScene,
+    ) {
+        use crate::sim::frost::CELL;
+        scene.frost.clear();
+        let (w, h) = (output.w, output.h);
+        let mut now = HashMap::new();
+        for c in world.frost() {
+            let local = Rect::new(c.x - output.x, c.y - output.y, CELL as u32, CELL as u32);
+            if clip_to(local, w, h).is_some() {
+                now.insert((c.x, c.y), self.sheet.frost(c.variant, c.level));
+            }
+        }
+        if now != tracker.frost {
+            let cell_rect = |&(x, y): &(i32, i32)| {
+                clip_to(
+                    Rect::new(x - output.x, y - output.y, CELL as u32, CELL as u32),
+                    w,
+                    h,
+                )
+            };
+            for (pos, sprite) in &now {
+                if tracker.frost.get(pos) != Some(sprite) {
+                    scene.clear.extend(cell_rect(pos));
+                }
+            }
+            for pos in tracker.frost.keys() {
+                if !now.contains_key(pos) {
+                    scene.clear.extend(cell_rect(pos));
+                }
+            }
+        }
+        if !scene.clear.is_empty() {
+            for (&(x, y), &sprite) in &now {
+                let r = Rect::new(x - output.x, y - output.y, CELL as u32, CELL as u32);
+                if scene.clear.iter().any(|c| c.intersect(&r).is_some()) {
+                    scene.frost.push(SpriteDraw {
+                        sprite,
+                        x: r.x,
+                        y: r.y,
+                    });
+                }
+            }
+        }
+        tracker.frost = now;
     }
 
     /// Icicles; an icicle's rect is cleared when it appears, changes (in
@@ -788,6 +929,14 @@ impl Renderer {
             data: pixmap.data_mut(),
         };
         for d in &scene.draws {
+            target.blit(self.sheet.get(d.sprite), d.x, d.y);
+        }
+        let mut target = Target {
+            w: pw as i32,
+            h: ph as i32,
+            data: pixmap.data_mut(),
+        };
+        for d in &scene.frost {
             target.blit(self.sheet.get(d.sprite), d.x, d.y);
         }
         if scene.images.is_empty() {
@@ -1226,4 +1375,45 @@ mod tests {
             rects / 200
         );
     }
+}
+
+/// Writes a frosted corner to `$FLURRY_ART_OUT/frost.png` for a look:
+/// `FLURRY_ART_OUT=/tmp/art cargo test --release -- --ignored frost_to_png`
+#[cfg(test)]
+#[test]
+#[ignore]
+fn frost_to_png() {
+    let Some(dir) = std::env::var_os("FLURRY_ART_OUT") else {
+        return;
+    };
+    let mut inputs = crate::sim::test_util::inputs_1080p();
+    inputs.cursor = Some(crate::geom::CursorState {
+        x: 960.0,
+        y: 540.0,
+        ..Default::default()
+    });
+    let mut world = World::new(crate::sim::SimParams::default(), 3);
+    for _ in 0..60 * 60 * 5 {
+        world.step(1.0 / 60.0, &inputs);
+    }
+    let out = inputs.outputs[0].rect;
+    let renderer = Renderer::new();
+    let (mut tracker, mut scene) = (PileTracker::default(), PileScene::default());
+    tracker.invalidate();
+    renderer.build_pile_scene(&world, out, &mut tracker, &mut scene);
+    let mut top = Pixmap::new(out.w, out.h).unwrap();
+    renderer.rasterize_piles(&scene, &mut top);
+    let mut bg = Pixmap::new(480, 300).unwrap();
+    bg.fill(Color::from_rgba8(40, 60, 100, 255));
+    bg.draw_pixmap(
+        0,
+        0,
+        top.as_ref(),
+        &tiny_skia::PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
+    let dir = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    bg.save_png(dir.join("frost.png")).unwrap();
 }

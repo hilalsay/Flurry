@@ -201,3 +201,13 @@ decided and why.
   reads which key was pressed. About one key in three knocks a small clump (≤ 1.5 px deep, 3
   columns) off the focused window's pile, popping up and sideways. Subtle by design. No XInput2 →
   the feature switches off with an info log.
+- **Phase 8 / feature 4, frost** (`features.frost = true`, `features.frost_idle_minutes = 3`). Per
+  monitor, a grid of 12 px cells. After the idle time, frost spreads from the four corners (each
+  cell freezes more when its neighbours are frozen; random per-cell "affinity" makes the front
+  ragged) out to 42% of the shorter side, thick near the corner and thin at the front. Moving the
+  pointer wipes a 30 px-wide clear path. Wiped spots refreeze after ≥ 20 s once the pointer has
+  been still for 10 s, and after 3 minutes of continuous activity the frost fades. Drawn on the top
+  layer (it's on the "glass") with 64 crystal sprites in the same XRender glyph set: 8 needle
+  directions pointing away from the corner × 2 branch patterns × 4 densities, with a haze that
+  thickens with density, so neighbouring cells join into fern-like streaks. Growth runs at 4 Hz, so
+  the 60 Hz step stays cheap (sim step 20 µs). Without a known pointer (Wayland) frost stays off.

@@ -83,6 +83,10 @@ pub struct Features {
     pub icicles: bool,
     /// Typing in a window shakes little clumps off its top.
     pub typing_shakes_snow: bool,
+    /// Frost creeps in from the corners when the mouse is idle.
+    pub frost: bool,
+    /// Minutes without mouse movement before frost starts.
+    pub frost_idle_minutes: f32,
 }
 
 impl Default for Features {
@@ -91,6 +95,8 @@ impl Default for Features {
             hot_apps_melt: true,
             icicles: true,
             typing_shakes_snow: true,
+            frost: true,
+            frost_idle_minutes: 3.0,
         }
     }
 }
