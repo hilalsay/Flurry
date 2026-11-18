@@ -132,6 +132,12 @@ pub trait Backend {
     /// The focused window, if known.
     fn active_window(&self) -> Option<u64>;
 
+    /// Is any visible window fullscreen (not just the focused one)?
+    fn any_fullscreen(&self) -> bool;
+
+    /// Is a screen-sharing indicator window open?
+    fn sharing_indicator(&self) -> bool;
+
     /// Re-read monitors, panels and windows (e.g. after waking from sleep).
     /// Returns the events that produces.
     fn rescan(&mut self) -> Result<Vec<BackendEvent>>;

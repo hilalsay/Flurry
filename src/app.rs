@@ -124,6 +124,9 @@ pub fn run(config: Config, opts: &RunOptions) -> Result<()> {
         backend.outputs().len()
     );
     let _watchers = power::watch(&tx, true);
+    if config.features.privacy_pause {
+        crate::privacy::watch_pipewire(tx.clone());
+    }
     if config.features.real_weather {
         crate::weather::watch(config.features.weather_city.clone(), tx.clone());
     }
@@ -181,6 +184,9 @@ struct MainLoop<'b> {
     heat_sampled: Option<Instant>,
     /// Real weather (feature 5), when known.
     weather: Option<crate::weather::Effect>,
+    /// Screen sharing (feature 8): an indicator window / a PipeWire stream.
+    sharing_indicator: bool,
+    sharing_stream: bool,
     commands: Receiver<Request>,
     tray: Option<Tray>,
     stats: Stats,
@@ -257,6 +263,8 @@ impl<'b> MainLoop<'b> {
             heat: crate::heat::Heat::new(),
             heat_sampled: None,
             weather: None,
+            sharing_indicator: false,
+            sharing_stream: false,
             commands,
             tray,
             stats: Stats::default(),
@@ -323,8 +331,15 @@ impl<'b> MainLoop<'b> {
             BackendEvent::WindowsChanged => {
                 self.windows_changed();
                 self.inputs.active_window = self.backend.active_window();
-                let fs = self.config.auto_pause_fullscreen && self.backend.fullscreen();
+                let privacy = self.config.features.privacy_pause;
+                let fs = (self.config.auto_pause_fullscreen && self.backend.fullscreen())
+                    || (privacy && self.backend.any_fullscreen());
                 self.set_auto(PauseReason::Fullscreen, fs)?;
+                let indicator = privacy && self.backend.sharing_indicator();
+                if indicator != self.sharing_indicator {
+                    self.sharing_indicator = indicator;
+                    self.update_sharing()?;
+                }
             }
             BackendEvent::Redraw(i) => {
                 if let Some(s) = self.surfaces.get_mut(i) {
@@ -372,6 +387,11 @@ impl<'b> MainLoop<'b> {
             .iter()
             .filter_map(|w| Some((w.id, self.heat.of(w.pid?))))
             .collect();
+    }
+
+    fn update_sharing(&mut self) -> Result<()> {
+        let sharing = self.sharing_indicator || self.sharing_stream;
+        self.set_auto(PauseReason::ScreenShare, sharing)
     }
 
     fn check_battery(&mut self) {
@@ -445,6 +465,11 @@ impl<'b> MainLoop<'b> {
             Command::Reload => self.reload()?,
             Command::Status => self.status(),
             Command::Quit => return Ok(("quitting".into(), Flow::Quit)),
+            Command::Auto(PauseReason::ScreenShare, on) => {
+                self.sharing_stream = on;
+                self.update_sharing()?;
+                "ok".into()
+            }
             Command::Auto(reason, on) => {
                 self.set_auto(reason, on)?;
                 "ok".into()

@@ -23,6 +23,7 @@ pub enum PauseReason {
     Locked,
     DoNotDisturb,
     Fullscreen,
+    ScreenShare,
 }
 
 impl PauseReason {
@@ -32,6 +33,7 @@ impl PauseReason {
             PauseReason::Locked => "screen locked",
             PauseReason::DoNotDisturb => "do not disturb",
             PauseReason::Fullscreen => "fullscreen",
+            PauseReason::ScreenShare => "screen shared",
         }
     }
 }

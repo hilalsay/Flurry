@@ -234,3 +234,15 @@ decided and why.
   every 350 ms. Each hit kicks a 0.9 s gust (70 px/s × strength 0.2–2), alternating left/right so the
   snow sways with the beat. Only a level is computed; no audio is kept or sent anywhere. `parec` is
   killed on exit (checked: none left after `flurry quit`).
+- **Phase 8 / feature 8, smart privacy pause** (`features.privacy_pause = true`). Adds to Phase 7's
+  DND and focused-fullscreen pauses:
+  - **any** visible fullscreen window pauses the snow, not just the focused one;
+  - **screen sharing**, two signals: (a) a sharing-indicator window title (Chrome-family "… is
+    sharing your screen / a window / this tab", Firefox "Sharing Indicator"); (b) `pw-dump` every 10 s
+    showing a *running* `Stream/Input/Video` node. **Not** the plan's `Video/Source`: this machine
+    always has a `Video/Source` node (the webcam device), so that check would pause forever. On X11,
+    browsers and most apps capture the screen directly through X11 (no PipeWire stream), so (a) is
+    the signal that works on Cinnamon. Zoom's native client and other apps with other indicator
+    titles are not detected. Verified live with a fake indicator window: paused while it was open,
+    resumed after. (b) is unit-tested only (no screen cast could be started here); verifying it on
+    Plasma 6 is part of Phase 9.

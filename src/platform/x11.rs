@@ -102,6 +102,8 @@ struct Client {
     collects: bool,
     fullscreen: bool,
     pid: Option<u32>,
+    /// A screen-sharing indicator (by title).
+    share_indicator: bool,
 }
 
 /// Re-query the window list at least this often, and at most this often.
@@ -884,6 +886,7 @@ impl X11Backend {
                 prop(a._NET_FRAME_EXTENTS, AtomEnum::CARDINAL)?,
                 prop(a._GTK_FRAME_EXTENTS, AtomEnum::CARDINAL)?,
                 prop(a._NET_WM_PID, AtomEnum::CARDINAL)?,
+                c.get_property(false, w, a._NET_WM_NAME, a.UTF8_STRING, 0, 256)?,
                 c.get_window_attributes(w)?,
                 c.get_geometry(w)?,
                 c.translate_coordinates(w, self.root, 0, 0)?,
@@ -896,7 +899,7 @@ impl X11Backend {
                 .unwrap_or_default()
         };
         let mut clients = Vec::new();
-        for ((&w, ty), (state, desk, fext, gext, pid, attrs, geom, pos, tree)) in
+        for ((&w, ty), (state, desk, fext, gext, pid, title, attrs, geom, pos, tree)) in
             stacking.iter().zip(&types).zip(pending)
         {
             let (Ok(attrs), Ok(geom), Ok(pos), Ok(tree)) =
@@ -936,6 +939,9 @@ impl X11Backend {
                 collects: visible && normal && !maximized && !fullscreen,
                 fullscreen: visible && fullscreen,
                 pid: values(pid.reply()).first().copied().filter(|&p| p > 0),
+                share_indicator: title.reply().is_ok_and(|t| {
+                    crate::privacy::is_share_indicator(&String::from_utf8_lossy(&t.value))
+                }),
             });
         }
         // Second pass: the geometry ConfigureNotify will report for each
@@ -1642,6 +1648,14 @@ impl Backend for X11Backend {
 
     fn active_window(&self) -> Option<u64> {
         self.active
+    }
+
+    fn any_fullscreen(&self) -> bool {
+        self.clients.iter().any(|c| c.fullscreen)
+    }
+
+    fn sharing_indicator(&self) -> bool {
+        self.clients.iter().any(|c| c.share_indicator)
     }
 
     fn rescan(&mut self) -> Result<Vec<BackendEvent>> {

@@ -91,6 +91,8 @@ pub struct Features {
     pub snow_globe: bool,
     /// Opt-in: bass in the music you play makes wind gusts.
     pub music_wind: bool,
+    /// Pause while any window is fullscreen or the screen is being shared.
+    pub privacy_pause: bool,
     /// Opt-in: follow the real weather of `weather_city` (Open-Meteo).
     pub real_weather: bool,
     /// City name for real weather mode, e.g. "Istanbul". Never auto-detected.
@@ -107,6 +109,7 @@ impl Default for Features {
             frost_idle_minutes: 3.0,
             snow_globe: true,
             music_wind: false,
+            privacy_pause: true,
             real_weather: false,
             weather_city: String::new(),
         }

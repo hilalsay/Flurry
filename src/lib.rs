@@ -11,6 +11,7 @@ pub mod ipc;
 pub mod music;
 pub mod platform;
 pub mod power;
+pub mod privacy;
 pub mod render;
 pub mod render_test;
 pub mod sim;
