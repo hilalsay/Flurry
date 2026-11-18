@@ -25,8 +25,13 @@ fn run_daemon(cli: &Cli, config_path: &std::path::Path) -> Result<()> {
     }
     let config = Config::load(config_path)?;
     log::debug!("config from {}: {config:?}", config_path.display());
-    log::debug!("requested backend: {:?}", cli.backend);
-    anyhow::bail!("no display backend implemented yet (phases 2–3)")
+    flurry::app::run(
+        &config,
+        &flurry::app::RunOptions {
+            backend: cli.backend,
+            no_compositor_check: cli.no_compositor_check,
+        },
+    )
 }
 
 fn run_command(cmd: Command, config_path: &std::path::Path) -> Result<()> {

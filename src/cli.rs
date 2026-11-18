@@ -2,9 +2,10 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 
 use crate::config::Intensity;
+pub use crate::platform::BackendKind;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -31,12 +32,6 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Option<Command>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum BackendKind {
-    X11,
-    Wayland,
 }
 
 #[derive(Debug, Subcommand)]

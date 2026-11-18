@@ -33,6 +33,22 @@ pub enum CarryModifier {
     Super,
 }
 
+/// Where falling flakes are drawn relative to app windows (PLAN.md §4 "Layering").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Layering {
+    /// Two-window on X11, mask on Wayland.
+    Auto,
+    /// Flakes window below apps, piles overlay on top.
+    TwoWindow,
+    /// Everything on the top overlay, flakes masked by window rects.
+    Mask,
+    /// Flakes below apps, no piles overlay.
+    Desktop,
+    /// Everything on top of all windows (the Phase 2 behaviour).
+    Front,
+}
+
 /// `monitors = "all"` or `monitors = ["DP-1", "HDMI-A-1"]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -75,6 +91,7 @@ pub struct Config {
     pub carry_modifier: CarryModifier,
     pub auto_pause_fullscreen: bool,
     pub monitors: Monitors,
+    pub layering: Layering,
 }
 
 impl Default for Config {
@@ -86,12 +103,13 @@ impl Default for Config {
             wind: 1.0,
             max_pile_height: 40,
             melt_rate: 1.0,
-            fps: 60,
+            fps: 30,
             pile_on_windows: true,
             interaction: true,
             carry_modifier: CarryModifier::Alt,
             auto_pause_fullscreen: true,
             monitors: Monitors::All(AllMarker::All),
+            layering: Layering::Auto,
         }
     }
 }
@@ -184,10 +202,12 @@ mod tests {
             carry_modifier = "alt"
             auto_pause_fullscreen = true
             monitors = "all"
+            layering = "two-window"
         "#;
         let cfg = Config::from_toml(text).unwrap();
         assert_eq!(cfg.intensity, Intensity::Heavy);
         assert_eq!(cfg.effective_flake_count(), 300);
+        assert_eq!(cfg.layering, Layering::TwoWindow);
     }
 
     #[test]

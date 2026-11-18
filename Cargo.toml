@@ -12,9 +12,11 @@ directories = "6.0.0"
 env_logger = "0.11.11"
 fastrand = "2.5.0"
 log = "0.4.35"
+rustix = { version = "1.1.6", features = ["event"] }
 serde = { version = "1.0.229", features = ["derive"] }
 tiny-skia = "0.12.0"
 toml = "1.2.1"
+x11rb = { version = "0.14.0", features = ["shape", "randr", "render"] }
 
 [profile.release]
 lto = "thin"
