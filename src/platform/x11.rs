@@ -8,7 +8,7 @@
 //! far cheaper than MIT-SHM `PutImage` of damaged rects: see PLAN.md changelog.
 
 use std::os::fd::AsFd;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use rustix::event::{PollFd, PollFlags, Timespec};
@@ -20,14 +20,14 @@ use x11rb::protocol::render::{
 use x11rb::protocol::shape::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{
     AtomEnum, ChangeWindowAttributesAux, ClipOrdering, ColormapAlloc, ConfigureWindowAux,
-    ConnectionExt as _, CreateWindowAux, EventMask, PropMode, Rectangle, Screen, StackMode,
-    VisualClass, Visualid, Window, WindowClass,
+    ConnectionExt as _, CreateWindowAux, EventMask, GrabMode, Keycode, ModMask, PropMode,
+    Rectangle, Screen, StackMode, VisualClass, Visualid, Window, WindowClass,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
-use super::{filter_outputs, Backend, BackendEvent, BackendOptions};
+use super::{filter_outputs, Backend, BackendEvent, BackendOptions, Hotkey};
 use crate::geom::{OutputInfo, Rect};
 use crate::render::{layer_rgb, Scene, SpriteDraw, SpriteSheet};
 use crate::sim::flakes::Layer;
@@ -45,6 +45,17 @@ x11rb::atom_manager! {
         _NET_WM_WINDOW_TYPE_DND,
         _NET_WM_BYPASS_COMPOSITOR,
     }
+}
+
+/// Key repeat sends many presses while the hotkey is held; act on one.
+const HOTKEY_DEBOUNCE: Duration = Duration::from_millis(400);
+
+/// What a batch of X events asks for.
+#[derive(Default)]
+struct Pending {
+    raise: bool,
+    outputs_changed: bool,
+    hotkey: bool,
 }
 
 /// Bytes per CompositeGlyphs32 element holding one glyph.
@@ -83,6 +94,8 @@ pub struct X11Backend {
     /// Reused encoding buffers.
     cmds: Vec<u8>,
     rects: Vec<Rectangle>,
+    hotkey: Option<Keycode>,
+    last_hotkey: Option<Instant>,
 }
 
 impl X11Backend {
@@ -144,7 +157,12 @@ impl X11Backend {
             glyphs: None,
             cmds: Vec::new(),
             rects: Vec::new(),
+            hotkey: None,
+            last_hotkey: None,
         };
+        if let Some(hk) = opts.hotkey {
+            backend.hotkey = backend.grab_hotkey(hk)?;
+        }
         backend.outputs = backend.query_outputs(&screen)?;
         backend.create_surfaces()?;
         Ok(backend)
@@ -401,26 +419,94 @@ impl X11Backend {
         self.surfaces.iter().any(|s| s.window == window)
     }
 
-    /// Returns true if outputs may have changed.
-    fn handle(&mut self, event: Event, raise: &mut bool) -> bool {
+    /// Grab `hk` on the root window. Returns the keycode, or `None` (with a
+    /// warning) if the key doesn't exist or another program already owns it.
+    fn grab_hotkey(&self, hk: Hotkey) -> Result<Option<Keycode>> {
+        let setup = self.conn.setup();
+        let (min, max) = (setup.min_keycode, setup.max_keycode);
+        let map = self
+            .conn
+            .get_keyboard_mapping(min, max - min + 1)?
+            .reply()?;
+        let per = usize::from(map.keysyms_per_keycode).max(1);
+        // Latin-1 keysyms for lowercase letters and digits equal their ASCII code.
+        let keysym = u32::from(hk.key);
+        let Some(index) = map
+            .keysyms
+            .chunks(per)
+            .position(|syms| syms.first() == Some(&keysym))
+        else {
+            log::warn!(
+                "hotkey {hk}: no key for {:?} on this keyboard layout",
+                hk.key
+            );
+            return Ok(None);
+        };
+        let code = min + index as u8;
+        let mut mods = 0u16;
+        for (on, m) in [
+            (hk.shift, ModMask::SHIFT),
+            (hk.ctrl, ModMask::CONTROL),
+            (hk.alt, ModMask::M1),
+            (hk.super_, ModMask::M4),
+        ] {
+            if on {
+                mods |= u16::from(m);
+            }
+        }
+        // Also grab with Caps Lock (Lock) and Num Lock (Mod2) on.
+        let lock = u16::from(ModMask::LOCK);
+        let num = u16::from(ModMask::M2);
+        for extra in [0, lock, num, lock | num] {
+            let grab = self.conn.grab_key(
+                false,
+                self.root,
+                ModMask::from(mods | extra),
+                code,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            )?;
+            if let Err(e) = grab.check() {
+                log::warn!(
+                    "hotkey {hk} is already used by another program ({e}); \
+                     bind `flurry toggle` in your keyboard settings or change `hotkey` in the config"
+                );
+                self.conn
+                    .ungrab_key(code, self.root, ModMask::ANY)?
+                    .check()
+                    .ok();
+                return Ok(None);
+            }
+        }
+        log::info!("hotkey {hk} toggles the snow");
+        Ok(Some(code))
+    }
+
+    fn handle(&mut self, event: Event, p: &mut Pending) {
         match event {
             // Something was stacked directly above one of our windows,
             // or a new window appeared (new windows map on top).
             Event::ConfigureNotify(e) if !self.is_ours(e.window) => {
-                *raise |= self.is_ours(e.above_sibling);
+                p.raise |= self.is_ours(e.above_sibling);
             }
-            Event::MapNotify(e) if !self.is_ours(e.window) => *raise = true,
-            Event::CirculateNotify(e) if !self.is_ours(e.window) => *raise = true,
+            Event::MapNotify(e) if !self.is_ours(e.window) => p.raise = true,
+            Event::CirculateNotify(e) if !self.is_ours(e.window) => p.raise = true,
+            Event::KeyPress(e) if Some(e.detail) == self.hotkey => {
+                let now = Instant::now();
+                if self.last_hotkey.is_none_or(|t| now - t > HOTKEY_DEBOUNCE) {
+                    p.hotkey = true;
+                }
+                self.last_hotkey = Some(now);
+            }
             Event::Expose(e) => {
                 if let Some(s) = self.surfaces.iter_mut().find(|s| s.window == e.window) {
                     s.full_pending = true;
                 }
             }
-            Event::RandrScreenChangeNotify(_) | Event::RandrNotify(_) => return true,
+            Event::RandrScreenChangeNotify(_) | Event::RandrNotify(_) => p.outputs_changed = true,
             Event::Error(e) => log::warn!("X11 error: {e:?}"),
             _ => {}
         }
-        false
     }
 
     fn rebuild_if_outputs_changed(&mut self) -> Result<bool> {
@@ -541,15 +627,18 @@ impl Backend for X11Backend {
             self.wait_readable(timeout)?;
             event = self.conn.poll_for_event()?;
         }
-        let (mut raise, mut outputs_maybe_changed) = (false, false);
+        let mut p = Pending::default();
         while let Some(e) = event {
-            outputs_maybe_changed |= self.handle(e, &mut raise);
+            self.handle(e, &mut p);
             event = self.conn.poll_for_event()?;
         }
         let mut events = Vec::new();
-        if outputs_maybe_changed && self.rebuild_if_outputs_changed()? {
+        if p.hotkey {
+            events.push(BackendEvent::Hotkey);
+        }
+        if p.outputs_changed && self.rebuild_if_outputs_changed()? {
             events.push(BackendEvent::OutputsChanged);
-        } else if raise {
+        } else if p.raise {
             // At most once per dispatch, so two "always on top" clients can't
             // ping-pong us into a busy loop.
             for s in &self.surfaces {

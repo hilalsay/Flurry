@@ -92,6 +92,8 @@ pub struct Config {
     pub auto_pause_fullscreen: bool,
     pub monitors: Monitors,
     pub layering: Layering,
+    /// Global toggle hotkey, e.g. `"super+shift+s"`; empty disables it.
+    pub hotkey: String,
 }
 
 impl Default for Config {
@@ -110,6 +112,7 @@ impl Default for Config {
             auto_pause_fullscreen: true,
             monitors: Monitors::All(AllMarker::All),
             layering: Layering::Auto,
+            hotkey: "super+shift+s".into(),
         }
     }
 }

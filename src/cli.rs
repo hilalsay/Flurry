@@ -45,8 +45,12 @@ pub enum Command {
         #[arg(value_enum)]
         level: Intensity,
     },
+    /// Set the frame rate (30 is the default, 60 is "smooth").
+    Fps { fps: u32 },
     /// Toggle play mode (lets the overlay receive the mouse on Wayland).
     Play,
+    /// Show whether flurry is running and its settings.
+    Status,
     /// Re-read the config file.
     Reload,
     /// Stop the running instance.

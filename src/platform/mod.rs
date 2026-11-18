@@ -24,6 +24,63 @@ pub enum BackendKind {
 pub enum BackendEvent {
     /// Monitors were added, removed or moved: re-read `outputs()`.
     OutputsChanged,
+    /// The global toggle hotkey was pressed.
+    Hotkey,
+}
+
+/// A global key combination such as `super+shift+s`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Hotkey {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub super_: bool,
+    /// A lowercase ASCII letter or digit.
+    pub key: char,
+}
+
+impl Hotkey {
+    /// Parse `"super+shift+s"`. An empty string means "no hotkey".
+    pub fn parse(text: &str) -> Result<Option<Hotkey>> {
+        let text = text.trim().to_ascii_lowercase();
+        if text.is_empty() || text == "none" {
+            return Ok(None);
+        }
+        let mut hk = Hotkey::default();
+        let mut parts: Vec<&str> = text.split('+').map(str::trim).collect();
+        let key = parts.pop().unwrap_or_default();
+        for m in parts {
+            match m {
+                "shift" => hk.shift = true,
+                "ctrl" | "control" => hk.ctrl = true,
+                "alt" => hk.alt = true,
+                "super" | "meta" | "win" => hk.super_ = true,
+                _ => bail!("unknown modifier {m:?} in hotkey {text:?}"),
+            }
+        }
+        let mut chars = key.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) if c.is_ascii_alphanumeric() => hk.key = c,
+            _ => bail!("hotkey key must be one letter or digit, got {key:?}"),
+        }
+        Ok(Some(hk))
+    }
+}
+
+impl std::fmt::Display for Hotkey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (on, name) in [
+            (self.super_, "Super+"),
+            (self.ctrl, "Ctrl+"),
+            (self.alt, "Alt+"),
+            (self.shift, "Shift+"),
+        ] {
+            if on {
+                f.write_str(name)?;
+            }
+        }
+        write!(f, "{}", self.key.to_ascii_uppercase())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -31,6 +88,7 @@ pub struct BackendOptions {
     /// X11: skip the "is a compositor running?" check.
     pub no_compositor_check: bool,
     pub monitors: Monitors,
+    pub hotkey: Option<Hotkey>,
 }
 
 pub trait Backend {
@@ -103,6 +161,17 @@ mod tests {
             rect: Rect::new(0, 0, 10, 10),
             scale: 1.0,
         }
+    }
+
+    #[test]
+    fn hotkey_parsing() {
+        let hk = Hotkey::parse("Super+Shift+S").unwrap().unwrap();
+        assert!(hk.super_ && hk.shift && !hk.ctrl && !hk.alt);
+        assert_eq!(hk.key, 's');
+        assert_eq!(hk.to_string(), "Super+Shift+S");
+        assert_eq!(Hotkey::parse("").unwrap(), None);
+        assert!(Hotkey::parse("hyper+s").is_err());
+        assert!(Hotkey::parse("super+space").is_err());
     }
 
     #[test]

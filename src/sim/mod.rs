@@ -88,6 +88,11 @@ impl World {
         }
     }
 
+    /// Remove all settled snow (piles, snowballs). Falling flakes keep falling.
+    pub fn clear_settled(&mut self) {
+        // Piles arrive in Phase 4; nothing has settled yet.
+    }
+
     /// Advance the simulation by `dt` seconds.
     pub fn step(&mut self, dt: f32, inputs: &Inputs) {
         let Some(bounds) = virtual_bounds(&inputs.outputs) else {

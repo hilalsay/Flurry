@@ -1,30 +1,39 @@
-//! The daemon: backend + world + renderer + main loop (PLAN.md §4 "Main loop").
+//! The daemon: backend + world + renderer + controls + main loop
+//! (PLAN.md §4 "Main loop").
 
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
-use crate::config::Config;
-use crate::geom::{Inputs, OutputInfo};
-use crate::platform::{self, Backend, BackendEvent, BackendKind, BackendOptions};
+use crate::config::{Config, Intensity};
+use crate::geom::{Inputs, OutputInfo, Rect};
+use crate::ipc::{self, Command, Request};
+use crate::platform::{self, Backend, BackendEvent, BackendKind, BackendOptions, Hotkey};
 use crate::render::{Damage, Renderer, Scene};
 use crate::sim::{SimParams, World};
+use crate::tray::{Tray, TrayState};
 
 /// Fixed simulation step.
 const STEP: Duration = Duration::from_nanos(1_000_000_000 / 60);
 /// Don't try to catch up more than this after a stall (e.g. suspend).
 const MAX_CATCH_UP: Duration = Duration::from_millis(250);
+/// Longest sleep between checks for commands (they don't wake the X poll).
+const MAX_WAIT: Duration = Duration::from_millis(100);
 /// Log frame timings this often at debug level.
 const STATS_EVERY: Duration = Duration::from_secs(10);
 
 pub struct RunOptions {
     pub backend: Option<BackendKind>,
     pub no_compositor_check: bool,
+    pub config_path: PathBuf,
+    pub socket_path: PathBuf,
 }
 
 /// Per-output render state.
 struct Surface {
-    rect: crate::geom::Rect,
+    rect: Rect,
     damage: Damage,
     scene: Scene,
 }
@@ -46,12 +55,47 @@ fn seed() -> u64 {
         .map_or(0, |d| d.as_nanos() as u64)
 }
 
-pub fn run(config: &Config, opts: &RunOptions) -> Result<()> {
+fn frame_interval(fps: u32) -> Duration {
+    Duration::from_secs(1) / fps.clamp(1, 240)
+}
+
+/// Ctrl+C / SIGTERM quit cleanly (removing the socket); SIGHUP reloads.
+fn spawn_signal_thread(tx: Sender<Request>) -> Result<()> {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    let mut signals = signal_hook::iterator::Signals::new([SIGHUP, SIGINT, SIGTERM])
+        .context("cannot install signal handlers")?;
+    std::thread::Builder::new()
+        .name("signals".into())
+        .spawn(move || {
+            for sig in signals.forever() {
+                let cmd = if sig == SIGHUP {
+                    Command::Reload
+                } else {
+                    Command::Quit
+                };
+                if tx.send(Request::fire(cmd)).is_err() {
+                    break;
+                }
+            }
+        })?;
+    Ok(())
+}
+
+pub fn run(config: Config, opts: &RunOptions) -> Result<()> {
+    let (tx, rx) = mpsc::channel();
+    // Bind the socket first: it is also the single-instance check.
+    let _server = ipc::Server::start(opts.socket_path.clone(), tx.clone())?;
+    spawn_signal_thread(tx.clone())?;
+    let hotkey = Hotkey::parse(&config.hotkey).unwrap_or_else(|e| {
+        log::warn!("ignoring hotkey: {e:#}");
+        None
+    });
     let mut backend = platform::select(
         opts.backend,
         &BackendOptions {
             no_compositor_check: opts.no_compositor_check,
             monitors: config.monitors.clone(),
+            hotkey,
         },
     )?;
     log::info!(
@@ -59,16 +103,33 @@ pub fn run(config: &Config, opts: &RunOptions) -> Result<()> {
         backend.name(),
         backend.outputs().len()
     );
-    MainLoop::new(config, backend.as_mut())?.run()
+    let tray = Tray::spawn(tx, tray_state(&config, false));
+    let mut main = MainLoop::new(config, opts.config_path.clone(), backend.as_mut(), rx, tray);
+    let result = main.run();
+    log::info!("stopping");
+    result
+}
+
+fn tray_state(config: &Config, paused: bool) -> TrayState {
+    TrayState {
+        paused,
+        intensity: config.intensity,
+        fps: config.fps,
+    }
 }
 
 struct MainLoop<'b> {
     backend: &'b mut dyn Backend,
+    config: Config,
+    config_path: PathBuf,
     world: World,
     renderer: Renderer,
     surfaces: Vec<Surface>,
     inputs: Inputs,
     frame_interval: Duration,
+    paused: bool,
+    commands: Receiver<Request>,
+    tray: Option<Tray>,
     stats: Stats,
 }
 
@@ -79,21 +140,38 @@ struct Stats {
     busy: Duration,
 }
 
+/// What the main loop should do after a command.
+enum Flow {
+    Continue,
+    Quit,
+}
+
 impl<'b> MainLoop<'b> {
-    fn new(config: &Config, backend: &'b mut dyn Backend) -> Result<Self> {
+    fn new(
+        config: Config,
+        config_path: PathBuf,
+        backend: &'b mut dyn Backend,
+        commands: Receiver<Request>,
+        tray: Option<Tray>,
+    ) -> Self {
         let inputs = Inputs {
             outputs: backend.outputs().to_vec(),
             ..Inputs::default()
         };
-        Ok(Self {
+        Self {
             surfaces: surfaces_for(&inputs.outputs),
             inputs,
             backend,
-            world: World::new(SimParams::from_config(config), seed()),
+            world: World::new(SimParams::from_config(&config), seed()),
             renderer: Renderer::new(),
-            frame_interval: Duration::from_secs(1) / config.fps,
+            frame_interval: frame_interval(config.fps),
+            config,
+            config_path,
+            paused: false,
+            commands,
+            tray,
             stats: Stats::default(),
-        })
+        }
     }
 
     fn run(&mut self) -> Result<()> {
@@ -101,13 +179,22 @@ impl<'b> MainLoop<'b> {
         let mut acc = Duration::ZERO;
         let mut next_frame = last;
         loop {
-            let wait = next_frame.saturating_duration_since(Instant::now());
-            for event in self.backend.dispatch(wait)? {
+            let until_frame = next_frame.saturating_duration_since(Instant::now());
+            for event in self.backend.dispatch(until_frame.min(MAX_WAIT))? {
                 match event {
-                    BackendEvent::OutputsChanged => self.outputs_changed()?,
+                    BackendEvent::OutputsChanged => self.outputs_changed(),
+                    BackendEvent::Hotkey => self.set_paused(!self.paused)?,
                 }
             }
+            if let Flow::Quit = self.handle_commands()? {
+                return Ok(());
+            }
             let now = Instant::now();
+            if self.paused {
+                // Resume without a jump in the simulation.
+                (last, next_frame) = (now, now);
+                continue;
+            }
             if now < next_frame {
                 continue;
             }
@@ -127,6 +214,125 @@ impl<'b> MainLoop<'b> {
         }
     }
 
+    fn handle_commands(&mut self) -> Result<Flow> {
+        while let Ok(req) = self.commands.try_recv() {
+            log::debug!("command: {}", req.cmd.encode());
+            let (answer, flow) = match self.execute(req.cmd) {
+                Ok(r) => r,
+                Err(e) => (format!("error: {e:#}"), Flow::Continue),
+            };
+            if let Some(reply) = req.reply {
+                let _ = reply.send(answer);
+            }
+            if let Flow::Quit = flow {
+                return Ok(Flow::Quit);
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn execute(&mut self, cmd: Command) -> Result<(String, Flow)> {
+        let answer = match cmd {
+            Command::Toggle => {
+                self.set_paused(!self.paused)?;
+                if self.paused { "paused" } else { "resumed" }.to_owned()
+            }
+            Command::Clear => {
+                self.world.clear_settled();
+                "cleared".into()
+            }
+            Command::Intensity(level) => {
+                self.set_intensity(level);
+                format!("intensity {}", ipc::intensity_name(level))
+            }
+            Command::Fps(fps) => {
+                anyhow::ensure!((1..=240).contains(&fps), "fps must be 1..=240");
+                self.config.fps = fps;
+                self.apply_config();
+                format!("fps {fps}")
+            }
+            Command::Play => {
+                "play mode isn't needed on X11: flurry already sees the real mouse".into()
+            }
+            Command::Reload => self.reload()?,
+            Command::Status => self.status(),
+            Command::Quit => return Ok(("quitting".into(), Flow::Quit)),
+        };
+        Ok((answer, Flow::Continue))
+    }
+
+    fn status(&self) -> String {
+        format!(
+            "{} intensity={} fps={} flakes={} monitors={}",
+            if self.paused { "paused" } else { "running" },
+            ipc::intensity_name(self.config.intensity),
+            self.config.fps,
+            self.world.flakes().len(),
+            self.inputs.outputs.len()
+        )
+    }
+
+    fn set_intensity(&mut self, level: Intensity) {
+        self.config.intensity = level;
+        // An explicit flake_count would override the new intensity.
+        self.config.flake_count = None;
+        self.apply_config();
+    }
+
+    fn reload(&mut self) -> Result<String> {
+        let new = Config::load(&self.config_path)?;
+        for (changed, what) in [
+            (new.monitors != self.config.monitors, "monitors"),
+            (new.layering != self.config.layering, "layering"),
+            (new.hotkey != self.config.hotkey, "hotkey"),
+        ] {
+            if changed {
+                log::info!("`{what}` changes take effect after restarting flurry");
+            }
+        }
+        self.config = new;
+        self.apply_config();
+        log::info!("config reloaded from {}", self.config_path.display());
+        Ok("config reloaded".into())
+    }
+
+    /// Push the current config into the world, the frame pacing and the tray.
+    fn apply_config(&mut self) {
+        self.world.set_params(SimParams::from_config(&self.config));
+        self.frame_interval = frame_interval(self.config.fps);
+        self.update_tray();
+    }
+
+    fn update_tray(&self) {
+        if let Some(tray) = &self.tray {
+            tray.update(tray_state(&self.config, self.paused));
+        }
+    }
+
+    fn set_paused(&mut self, paused: bool) -> Result<()> {
+        if paused == self.paused {
+            return Ok(());
+        }
+        self.paused = paused;
+        log::info!("{}", if paused { "paused" } else { "resumed" });
+        if paused {
+            self.hide()?;
+        }
+        self.update_tray();
+        Ok(())
+    }
+
+    /// Clear every output; the next frame after resuming redraws in full.
+    fn hide(&mut self) -> Result<()> {
+        for (i, s) in self.surfaces.iter_mut().enumerate() {
+            s.scene.clear = vec![Rect::new(0, 0, s.rect.w, s.rect.h)];
+            s.scene.draws.clear();
+            self.backend.present(i, &s.scene, self.renderer.sprites())?;
+            s.damage.invalidate();
+        }
+        Ok(())
+    }
+
     fn draw(&mut self) -> Result<()> {
         for (i, s) in self.surfaces.iter_mut().enumerate() {
             self.renderer
@@ -136,13 +342,12 @@ impl<'b> MainLoop<'b> {
         Ok(())
     }
 
-    fn outputs_changed(&mut self) -> Result<()> {
+    fn outputs_changed(&mut self) {
         self.inputs.outputs = self.backend.outputs().to_vec();
         self.surfaces = surfaces_for(&self.inputs.outputs);
         for o in &self.inputs.outputs {
             log::debug!("output {}: {:?}", o.name, o.rect);
         }
-        Ok(())
     }
 
     fn record(&mut self, frame_start: Instant) {

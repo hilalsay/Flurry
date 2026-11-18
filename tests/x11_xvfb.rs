@@ -8,6 +8,7 @@
 
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use x11rb::connection::Connection;
@@ -128,8 +129,13 @@ fn check_overlay_window(display: &str) {
     );
 }
 
+/// Tests start their own X server; run them one at a time so they don't
+/// race for display numbers.
+static X_SERVER: Mutex<()> = Mutex::new(());
+
 #[test]
 fn x11_overlay_under_xvfb() {
+    let _lock = X_SERVER.lock().unwrap_or_else(|e| e.into_inner());
     let Some(xvfb) = start_xvfb() else { return };
 
     // 1. Xvfb runs no compositor: flurry must refuse with a clear message.
@@ -157,4 +163,87 @@ fn x11_overlay_under_xvfb() {
     assert!(!stderr.contains("ERROR"), "errors logged:\n{stderr}");
     assert!(!stderr.contains("X11 error"), "X errors:\n{stderr}");
     assert!(!stderr.contains("panicked"), "panic:\n{stderr}");
+}
+
+/// Runs `flurry <args>` as a client against the daemon using `runtime_dir`.
+fn client(runtime_dir: &Path, args: &[&str]) -> (bool, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_flurry"))
+        .args(args)
+        .env("XDG_RUNTIME_DIR", runtime_dir)
+        .output()
+        .expect("run client");
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        + String::from_utf8_lossy(&out.stderr).trim();
+    (out.status.success(), text)
+}
+
+fn wait_for(cond: impl Fn() -> bool, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !cond() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// PLAN.md Phase 3: CLI commands reach the daemon; quit and SIGTERM remove the socket.
+#[test]
+fn controls_over_ipc() {
+    let _lock = X_SERVER.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(xvfb) = start_xvfb() else { return };
+    let runtime = std::env::temp_dir().join(format!("flurry-ipc-test-{}", std::process::id()));
+    std::fs::create_dir_all(&runtime).unwrap();
+    let socket = runtime.join("flurry.sock");
+    let start = || {
+        flurry(&xvfb.display)
+            .arg("--no-compositor-check")
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .spawn()
+            .expect("spawn flurry")
+    };
+
+    let (ok, text) = client(&runtime, &["status"]);
+    assert!(!ok && text.contains("not running"), "{text}");
+
+    let mut daemon = start();
+    wait_for(|| socket.exists(), "socket");
+    let (ok, text) = client(&runtime, &["status"]);
+    assert!(
+        ok && text.starts_with("running intensity=medium fps=30"),
+        "{text}"
+    );
+    assert_eq!(client(&runtime, &["toggle"]), (true, "paused".into()));
+    assert!(client(&runtime, &["status"]).1.starts_with("paused"));
+    assert_eq!(client(&runtime, &["toggle"]), (true, "resumed".into()));
+    assert_eq!(
+        client(&runtime, &["intensity", "heavy"]),
+        (true, "intensity heavy".into())
+    );
+    assert_eq!(client(&runtime, &["fps", "60"]), (true, "fps 60".into()));
+    let (_, text) = client(&runtime, &["status"]);
+    assert!(text.contains("intensity=heavy fps=60 flakes=267"), "{text}");
+    let (ok, _) = client(&runtime, &["fps", "0"]);
+    assert!(!ok, "fps 0 must be rejected");
+
+    // A second daemon refuses to start while the first owns the socket.
+    let second = flurry(&xvfb.display)
+        .arg("--no-compositor-check")
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .output()
+        .unwrap();
+    assert!(!second.status.success());
+    assert!(String::from_utf8_lossy(&second.stderr).contains("already running"));
+
+    assert_eq!(client(&runtime, &["quit"]), (true, "quitting".into()));
+    let status = daemon.wait().unwrap();
+    assert!(status.success(), "quit should exit 0: {status:?}");
+    assert!(!socket.exists(), "socket must be removed on quit");
+
+    // SIGTERM (and Ctrl+C) also shut down cleanly.
+    let mut daemon = start();
+    wait_for(|| socket.exists(), "socket");
+    let pid = daemon.id().to_string();
+    Command::new("kill").args(["-TERM", &pid]).status().unwrap();
+    assert!(daemon.wait().unwrap().success(), "SIGTERM should exit 0");
+    assert!(!socket.exists(), "socket must be removed on SIGTERM");
+    std::fs::remove_dir_all(&runtime).ok();
 }

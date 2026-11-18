@@ -50,3 +50,20 @@ decided and why.
   total cost < 12% of a core; flurry alone < 3%. **Default `fps` is 30.**
 - **Phase 2 commit:** committed before the manual check finished, so later phases can build on it.
   Anything the check finds gets fixed in a follow-up commit.
+- **Phase 3:** IPC is one text line per connection on `$XDG_RUNTIME_DIR/flurry.sock`. Binding the
+  socket is also the single-instance check: a live socket makes a second daemon exit with
+  "already running", and a stale one is removed. Added CLI `status` and `fps <n>` alongside the
+  planned commands.
+- **Phase 3:** **Pause hides the snow** (clears every window and stops the simulation) rather than
+  freezing it, so the toggle works as an on/off switch.
+- **Phase 3:** Tray and CLI changes (intensity, fps) apply **in memory only** and are not written to
+  `config.toml`, so the user's file and its comments are never rewritten. Defaults come from the config.
+- **Phase 3:** `ksni` uses its `blocking` API on the `async-io` runtime (`default-features = false`)
+  instead of the default tokio, which keeps the dependency tree smaller. Verified on Cinnamon: the icon
+  registers with `xapp-sn-watcher`, so no libxapp fallback is needed.
+- **Phase 3:** New dependency **`signal-hook`**: std has no signal handling. Ctrl+C and SIGTERM quit
+  cleanly (removing the socket) and SIGHUP reloads. Commands from the socket, tray and signals arrive on
+  a channel that the main loop checks at least every 100 ms (the X poll timeout is capped).
+- **Phase 3:** The hotkey is grabbed four times (plain, + Caps Lock, + Num Lock, + both) so it works
+  whatever the lock state. Key repeat is debounced (400 ms). If another program owns the combo,
+  flurry logs a warning and carries on. Config key `hotkey` (`""` disables it).
