@@ -18,9 +18,14 @@ fn main() -> Result<()> {
 
     match cli.command {
         None => run_daemon(&cli, &config_path),
-        Some(Command::RenderTest { frames, out, seed }) => {
+        Some(Command::RenderTest {
+            frames,
+            out,
+            seed,
+            warmup,
+        }) => {
             let config = Config::load(&config_path)?;
-            flurry::render_test::run(&config, frames, &out, seed)
+            flurry::render_test::run(&config, frames, &out, seed, warmup)
         }
         Some(cmd) => send_command(cmd),
     }

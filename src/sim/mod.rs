@@ -6,8 +6,9 @@ pub mod piles;
 pub mod snowballs;
 
 use crate::config::Config;
-use crate::geom::{Inputs, OutputInfo, Rect};
+use crate::geom::{Inputs, OutputInfo, Rect, WindowRect};
 use flakes::{Flakes, Wind};
+use piles::Piles;
 
 /// Screen area that `flake_count` refers to. Bigger or more monitors get
 /// proportionally more flakes so the snow looks equally dense everywhere.
@@ -20,6 +21,8 @@ pub struct SimParams {
     pub flake_count: u32,
     pub fall_speed: f32,
     pub wind: f32,
+    pub max_pile_height: f32,
+    pub melt_rate: f32,
 }
 
 impl SimParams {
@@ -28,6 +31,8 @@ impl SimParams {
             flake_count: c.effective_flake_count(),
             fall_speed: c.fall_speed,
             wind: c.wind,
+            max_pile_height: c.max_pile_height as f32,
+            melt_rate: c.melt_rate,
         }
     }
 }
@@ -47,6 +52,9 @@ pub struct World {
     time: f64,
     bounds: Option<Rect>,
     screen_area: f64,
+    piles: Piles,
+    /// Output rects and obstacles the piles were last synced to.
+    layout: (Vec<Rect>, Vec<WindowRect>),
 }
 
 impl World {
@@ -59,7 +67,17 @@ impl World {
             time: 0.0,
             bounds: None,
             screen_area: 0.0,
+            piles: Piles::default(),
+            layout: Default::default(),
         }
+    }
+
+    pub fn piles(&self) -> &Piles {
+        &self.piles
+    }
+
+    pub fn params(&self) -> &SimParams {
+        &self.params
     }
 
     pub fn flakes(&self) -> &Flakes {
@@ -90,7 +108,7 @@ impl World {
 
     /// Remove all settled snow (piles, snowballs). Falling flakes keep falling.
     pub fn clear_settled(&mut self) {
-        // Piles arrive in Phase 4; nothing has settled yet.
+        self.piles.clear();
     }
 
     /// Advance the simulation by `dt` seconds.
@@ -104,15 +122,27 @@ impl World {
             self.screen_area = inputs.outputs.iter().map(output_area).sum();
             self.flakes.scatter(self.target_count(), &bounds);
         }
+        self.sync_piles(inputs);
         self.time += f64::from(dt);
         self.wind.update(self.time);
-        self.flakes.step(
+        let (piles, max_h) = (&mut self.piles, self.params.max_pile_height);
+        self.flakes.step_landing(
             dt,
             self.time,
             self.wind.current(),
             self.params.fall_speed,
             &bounds,
+            |f, y_before| f.layer.collides() && piles.try_land(f.x, y_before, f.y, f.r, max_h),
         );
+        self.piles.step(dt, self.params.melt_rate, max_h);
+    }
+
+    fn sync_piles(&mut self, inputs: &Inputs) {
+        let outputs: Vec<Rect> = inputs.outputs.iter().map(|o| o.rect).collect();
+        if self.layout.0 != outputs || self.layout.1 != inputs.obstacles {
+            self.piles.sync(inputs, self.params.max_pile_height);
+            self.layout = (outputs, inputs.obstacles.clone());
+        }
     }
 
     fn target_count(&self) -> usize {
@@ -229,6 +259,35 @@ mod tests {
         ];
         assert_eq!(virtual_bounds(&outs), Some(Rect::new(100, 50, 200, 100)));
         assert_eq!(virtual_bounds(&[]), None);
+    }
+
+    #[test]
+    fn snow_builds_up_on_the_panel_and_stays_below_max() {
+        let mut w = World::new(SimParams::default(), 3);
+        let mut inputs = inputs_1080p();
+        inputs.obstacles.push(WindowRect {
+            id: 1,
+            rect: Rect::new(0, 1040, 1920, 40),
+        });
+        let max = w.params().max_pile_height;
+        let mut samples = Vec::new();
+        for minute in 0..10 {
+            for _ in 0..60 * 60 {
+                w.step(1.0 / 60.0, &inputs);
+            }
+            let s = &w.piles().surfaces()[0];
+            let mean = s.volume() / (s.heights.len() as f32 * piles::COL_W);
+            samples.push((minute + 1, mean, s.max_height()));
+            assert!(s.max_height() <= max);
+        }
+        eprintln!("(minute, mean height, max height): {samples:?}");
+        let (_, mean_10, _) = samples[9];
+        assert!(
+            (4.0..=max * 0.8).contains(&mean_10),
+            "after 10 min mean height {mean_10}"
+        );
+        w.clear_settled();
+        assert_eq!(w.piles().volume(), 0.0);
     }
 
     /// PLAN.md Phase 1: one step with 300 flakes takes < 0.2 ms.

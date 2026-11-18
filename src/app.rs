@@ -10,8 +10,8 @@ use anyhow::{Context, Result};
 use crate::config::{Config, Intensity};
 use crate::geom::{Inputs, OutputInfo, Rect};
 use crate::ipc::{self, Command, Request};
-use crate::platform::{self, Backend, BackendEvent, BackendKind, BackendOptions, Hotkey};
-use crate::render::{Damage, Renderer, Scene};
+use crate::platform::{self, Backend, BackendEvent, BackendKind, BackendOptions, Frame, Hotkey};
+use crate::render::{Damage, PileScene, PileTracker, Renderer, Scene};
 use crate::sim::{SimParams, World};
 use crate::tray::{Tray, TrayState};
 
@@ -36,6 +36,16 @@ struct Surface {
     rect: Rect,
     damage: Damage,
     scene: Scene,
+    piles: PileTracker,
+    pile_scene: PileScene,
+}
+
+impl Surface {
+    /// The next frame starts from scratch (window content lost).
+    fn invalidate(&mut self) {
+        self.damage.invalidate();
+        self.piles.invalidate();
+    }
 }
 
 fn surfaces_for(outputs: &[OutputInfo]) -> Vec<Surface> {
@@ -45,6 +55,8 @@ fn surfaces_for(outputs: &[OutputInfo]) -> Vec<Surface> {
             rect: o.rect,
             damage: Damage::new(o.rect.w, o.rect.h),
             scene: Scene::default(),
+            piles: PileTracker::default(),
+            pile_scene: PileScene::default(),
         })
         .collect()
 }
@@ -96,6 +108,7 @@ pub fn run(config: Config, opts: &RunOptions) -> Result<()> {
             no_compositor_check: opts.no_compositor_check,
             monitors: config.monitors.clone(),
             hotkey,
+            layering: config.layering,
         },
     )?;
     log::info!(
@@ -156,6 +169,7 @@ impl<'b> MainLoop<'b> {
     ) -> Self {
         let inputs = Inputs {
             outputs: backend.outputs().to_vec(),
+            obstacles: backend.obstacles().to_vec(),
             ..Inputs::default()
         };
         Self {
@@ -184,6 +198,14 @@ impl<'b> MainLoop<'b> {
                 match event {
                     BackendEvent::OutputsChanged => self.outputs_changed(),
                     BackendEvent::Hotkey => self.set_paused(!self.paused)?,
+                    BackendEvent::ObstaclesChanged => {
+                        self.inputs.obstacles = self.backend.obstacles().to_vec();
+                    }
+                    BackendEvent::Redraw(i) => {
+                        if let Some(s) = self.surfaces.get_mut(i) {
+                            s.invalidate();
+                        }
+                    }
                 }
             }
             if let Flow::Quit = self.handle_commands()? {
@@ -263,12 +285,14 @@ impl<'b> MainLoop<'b> {
 
     fn status(&self) -> String {
         format!(
-            "{} intensity={} fps={} flakes={} monitors={}",
+            "{} intensity={} fps={} flakes={} monitors={} panels={} snow={:.0}",
             if self.paused { "paused" } else { "running" },
             ipc::intensity_name(self.config.intensity),
             self.config.fps,
             self.world.flakes().len(),
-            self.inputs.outputs.len()
+            self.inputs.outputs.len(),
+            self.inputs.obstacles.len(),
+            self.world.piles().volume()
         )
     }
 
@@ -325,10 +349,18 @@ impl<'b> MainLoop<'b> {
     /// Clear every output; the next frame after resuming redraws in full.
     fn hide(&mut self) -> Result<()> {
         for (i, s) in self.surfaces.iter_mut().enumerate() {
-            s.scene.clear = vec![Rect::new(0, 0, s.rect.w, s.rect.h)];
+            let all = vec![Rect::new(0, 0, s.rect.w, s.rect.h)];
+            s.scene.clear.clone_from(&all);
             s.scene.draws.clear();
-            self.backend.present(i, &s.scene, self.renderer.sprites())?;
-            s.damage.invalidate();
+            s.pile_scene.clear = all;
+            s.pile_scene.piles.clear();
+            let frame = Frame {
+                flakes: &s.scene,
+                piles: &s.pile_scene,
+                sprites: self.renderer.sprites(),
+            };
+            self.backend.present(i, &frame)?;
+            s.invalidate();
         }
         Ok(())
     }
@@ -337,13 +369,21 @@ impl<'b> MainLoop<'b> {
         for (i, s) in self.surfaces.iter_mut().enumerate() {
             self.renderer
                 .build_scene(&self.world, s.rect, &mut s.damage, &mut s.scene);
-            self.backend.present(i, &s.scene, self.renderer.sprites())?;
+            self.renderer
+                .build_pile_scene(&self.world, s.rect, &mut s.piles, &mut s.pile_scene);
+            let frame = Frame {
+                flakes: &s.scene,
+                piles: &s.pile_scene,
+                sprites: self.renderer.sprites(),
+            };
+            self.backend.present(i, &frame)?;
         }
         Ok(())
     }
 
     fn outputs_changed(&mut self) {
         self.inputs.outputs = self.backend.outputs().to_vec();
+        self.inputs.obstacles = self.backend.obstacles().to_vec();
         self.surfaces = surfaces_for(&self.inputs.outputs);
         for o in &self.inputs.outputs {
             log::debug!("output {}: {:?}", o.name, o.rect);

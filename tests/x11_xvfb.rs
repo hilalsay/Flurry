@@ -76,9 +76,23 @@ fn start_xvfb() -> Option<Xvfb> {
     panic!("no free X display number");
 }
 
+/// A fresh runtime dir, so test daemons never meet the user's own flurry.
+fn runtime_dir() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "flurry-test-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).expect("create runtime dir");
+    dir
+}
+
 fn flurry(display: &str) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_flurry"));
     cmd.env("DISPLAY", display)
+        .env("XDG_RUNTIME_DIR", runtime_dir())
         .env_remove("WAYLAND_DISPLAY")
         .env("RUST_LOG", "debug")
         .env("XDG_CONFIG_HOME", "/nonexistent") // defaults, not the user's config
@@ -107,25 +121,31 @@ fn check_overlay_window(display: &str) {
     let windows = flurry_windows(display);
     assert_eq!(
         windows.len(),
-        1,
-        "expected one overlay window on a 1-monitor screen"
+        2,
+        "expected a flakes and a piles window on a 1-monitor screen"
     );
     let (conn, _) = x11rb::connect(Some(display)).expect("connect");
-    let w = windows[0];
-    let attrs = conn.get_window_attributes(w).unwrap().reply().unwrap();
-    assert!(attrs.override_redirect, "overlay must be override-redirect");
-    assert_eq!(attrs.map_state, x11rb::protocol::xproto::MapState::VIEWABLE);
-    let geom = conn.get_geometry(w).unwrap().reply().unwrap();
-    assert_eq!(geom.depth, 32, "overlay must use a 32-bit ARGB visual");
-    assert_eq!((geom.width, geom.height), (1280, 720));
-    let input = conn
-        .shape_get_rectangles(w, SK::INPUT)
-        .unwrap()
-        .reply()
-        .unwrap();
-    assert!(
-        input.rectangles.is_empty(),
-        "input shape must be empty (click-through)"
+    let mut override_redirect = 0;
+    for w in windows {
+        let attrs = conn.get_window_attributes(w).unwrap().reply().unwrap();
+        override_redirect += usize::from(attrs.override_redirect);
+        assert_eq!(attrs.map_state, x11rb::protocol::xproto::MapState::VIEWABLE);
+        let geom = conn.get_geometry(w).unwrap().reply().unwrap();
+        assert_eq!(geom.depth, 32, "windows must use a 32-bit ARGB visual");
+        assert_eq!((geom.width, geom.height), (1280, 720));
+        let input = conn
+            .shape_get_rectangles(w, SK::INPUT)
+            .unwrap()
+            .reply()
+            .unwrap();
+        assert!(
+            input.rectangles.is_empty(),
+            "input shape must be empty (click-through)"
+        );
+    }
+    assert_eq!(
+        override_redirect, 1,
+        "the piles window is override-redirect, the flakes window is managed"
     );
 }
 
@@ -246,4 +266,100 @@ fn controls_over_ipc() {
     assert!(daemon.wait().unwrap().success(), "SIGTERM should exit 0");
     assert!(!socket.exists(), "socket must be removed on SIGTERM");
     std::fs::remove_dir_all(&runtime).ok();
+}
+
+/// PLAN.md Phase 4: with an EWMH window manager (openbox), the flakes window
+/// stays below app windows, so no flake pixels appear inside them.
+#[test]
+fn flakes_stay_behind_app_windows() {
+    use x11rb::protocol::xproto::{CreateWindowAux, EventMask, ImageFormat, WindowClass};
+    use x11rb::protocol::Event;
+
+    let _lock = X_SERVER.lock().unwrap_or_else(|e| e.into_inner());
+    if Command::new("openbox").arg("--version").output().is_err() {
+        eprintln!("SKIPPED: openbox not installed (sudo apt install openbox)");
+        return;
+    }
+    let Some(xvfb) = start_xvfb() else { return };
+    let mut wm = Command::new("openbox")
+        .env("DISPLAY", &xvfb.display)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn openbox");
+    std::thread::sleep(Duration::from_millis(800));
+
+    // Three plain white app windows, away from the screen bottom (piles).
+    let (conn, screen_num) = x11rb::connect(Some(&xvfb.display)).expect("connect");
+    let screen = conn.setup().roots[screen_num].clone();
+    let mut windows = Vec::new();
+    for (x, y) in [(40, 40), (450, 120), (850, 60)] {
+        let w = conn.generate_id().unwrap();
+        conn.create_window(
+            screen.root_depth,
+            w,
+            screen.root,
+            x,
+            y,
+            320,
+            240,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            screen.root_visual,
+            &CreateWindowAux::new()
+                .background_pixel(screen.white_pixel)
+                .event_mask(EventMask::STRUCTURE_NOTIFY),
+        )
+        .unwrap();
+        conn.map_window(w).unwrap();
+        windows.push(w);
+    }
+    conn.flush().unwrap();
+    let mut mapped = 0;
+    while mapped < windows.len() {
+        if let Ok(Event::MapNotify(_)) = conn.wait_for_event() {
+            mapped += 1;
+        }
+    }
+
+    let mut daemon = flurry(&xvfb.display)
+        .arg("--no-compositor-check")
+        .spawn()
+        .expect("spawn flurry");
+    std::thread::sleep(Duration::from_secs(3));
+
+    let mut flake_pixels = 0;
+    for _ in 0..5 {
+        for &w in &windows {
+            let pos = conn
+                .translate_coordinates(w, screen.root, 0, 0)
+                .unwrap()
+                .reply()
+                .unwrap();
+            let img = conn
+                .get_image(
+                    ImageFormat::Z_PIXMAP,
+                    screen.root,
+                    pos.dst_x,
+                    pos.dst_y,
+                    320,
+                    240,
+                    !0,
+                )
+                .unwrap()
+                .reply()
+                .unwrap();
+            flake_pixels += img
+                .data
+                .chunks(4)
+                .filter(|p| p[0] != 255 || p[1] != 255 || p[2] != 255)
+                .count();
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    let _ = wm.kill();
+    let _ = wm.wait();
+    assert_eq!(flake_pixels, 0, "flakes were drawn over app windows");
 }

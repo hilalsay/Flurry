@@ -200,16 +200,31 @@ impl Flakes {
 
     /// Advance every flake by `dt` seconds. `wind` is in px/s at full strength.
     pub fn step(&mut self, dt: f32, t: f64, wind: f32, fall_speed: f32, bounds: &Rect) {
+        self.step_landing(dt, t, wind, fall_speed, bounds, |_, _| false);
+    }
+
+    /// Like [`step`](Self::step), but `land(flake, y_before)` may claim a
+    /// flake (it settled on a pile); claimed flakes respawn at the top.
+    pub fn step_landing(
+        &mut self,
+        dt: f32,
+        t: f64,
+        wind: f32,
+        fall_speed: f32,
+        bounds: &Rect,
+        mut land: impl FnMut(&Flake, f32) -> bool,
+    ) {
         let left = bounds.x as f32 - WRAP_MARGIN;
         let width = bounds.w as f32 + 2.0 * WRAP_MARGIN;
         let bottom = bounds.bottom() as f32;
         let rng = &mut self.rng;
         for f in &mut self.flakes {
             let sway = f.sway_amp * phase_sin(t, f.sway_freq, f.sway_phase);
+            let y_before = f.y;
             f.x += (wind * f.layer.spec().wind + sway) * dt;
             f.y += f.fall * fall_speed * dt;
             f.x = wrap(f.x, left, width);
-            if f.y - f.r > bottom {
+            if f.y - f.r > bottom || land(f, y_before) {
                 *f = Flake::spawn_top(rng, bounds);
             }
         }

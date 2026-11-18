@@ -9,9 +9,9 @@ pub mod x11;
 
 use std::time::Duration;
 
-use crate::config::Monitors;
-use crate::geom::OutputInfo;
-use crate::render::{Scene, SpriteSheet};
+use crate::config::{Layering, Monitors};
+use crate::geom::{OutputInfo, WindowRect};
+use crate::render::{PileScene, Scene, SpriteSheet};
 use anyhow::{bail, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -26,6 +26,19 @@ pub enum BackendEvent {
     OutputsChanged,
     /// The global toggle hotkey was pressed.
     Hotkey,
+    /// Panels/docks moved, resized, appeared or vanished: re-read `obstacles()`.
+    ObstaclesChanged,
+    /// Output `n`'s windows lost their content (e.g. Expose): redraw it in full.
+    Redraw(usize),
+}
+
+/// Everything to show on one output this frame.
+pub struct Frame<'a> {
+    /// Falling flakes (drawn behind app windows when layering allows).
+    pub flakes: &'a Scene,
+    /// Settled snow, drawn on top of everything.
+    pub piles: &'a PileScene,
+    pub sprites: &'a SpriteSheet,
 }
 
 /// A global key combination such as `super+shift+s`.
@@ -89,6 +102,7 @@ pub struct BackendOptions {
     pub no_compositor_check: bool,
     pub monitors: Monitors,
     pub hotkey: Option<Hotkey>,
+    pub layering: Layering,
 }
 
 pub trait Backend {
@@ -97,12 +111,14 @@ pub trait Backend {
     /// The overlaid monitors, in global coordinates. Indices match `present`.
     fn outputs(&self) -> &[OutputInfo];
 
-    /// Show the next frame on output `output`. `scene` is incremental: it
-    /// clears and redraws only what changed since the previous scene for this
+    /// Panels/docks, in global coordinates.
+    fn obstacles(&self) -> &[WindowRect];
+
+    /// Show the next frame on output `output`. Scenes are incremental: they
+    /// clear and redraw only what changed since the previous frame for this
     /// output. `sprites` never changes, so backends may upload it once.
-    /// After e.g. an Expose the backend must redraw fully on its own
-    /// (`scene.draws` always lists every visible sprite).
-    fn present(&mut self, output: usize, scene: &Scene, sprites: &SpriteSheet) -> Result<()>;
+    /// If a window loses its content the backend sends `Redraw`.
+    fn present(&mut self, output: usize, frame: &Frame) -> Result<()>;
 
     /// Handle pending events, waiting at most `timeout` for the first one.
     fn dispatch(&mut self, timeout: Duration) -> Result<Vec<BackendEvent>>;

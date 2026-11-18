@@ -7,10 +7,13 @@
 //!
 //! Sprites are pre-rendered soft discs: quantised radius × 4×4 subpixel offsets.
 
-use tiny_skia::{Color, Pixmap};
+use std::collections::{HashMap, HashSet};
+
+use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Transform};
 
 use crate::geom::Rect;
 use crate::sim::flakes::{Flake, Layer};
+use crate::sim::piles::{Surface, SurfaceKey, COL_W};
 use crate::sim::World;
 
 const SUBPIXEL: usize = 4;
@@ -241,6 +244,256 @@ impl Renderer {
             y: iy - half,
         }
     }
+}
+
+/// Pile colours (premultiplied-free RGBA): near-white snow, and a soft
+/// blue-grey line just under it.
+pub const PILE_FILL: [u8; 4] = [246, 249, 255, 255];
+pub const PILE_SHADOW: [u8; 4] = [95, 115, 155, 120];
+/// How far the shadow outline is shifted down (px).
+pub const PILE_SHADOW_OFFSET: f32 = 1.5;
+/// Redraw a column once its height changed by this much (px).
+const PILE_REDRAW_STEP: f32 = 0.25;
+/// Extra space around a pile that its drawing may touch (shadow, AA).
+const PILE_PAD: f32 = 4.0;
+
+/// A run of pile columns to draw, in output-local px.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PileDraw {
+    /// Left edge of the first column.
+    pub x0: f32,
+    /// The line the snow rests on.
+    pub base_y: f32,
+    /// Height per column (each `COL_W` wide).
+    pub heights: Vec<f32>,
+}
+
+impl PileDraw {
+    /// Top outline from left to right: column centres, plus both ends.
+    pub fn outline(&self) -> Vec<(f32, f32)> {
+        let n = self.heights.len();
+        let mut pts = Vec::with_capacity(n + 2);
+        let (first, last) = (self.heights[0], self.heights[n - 1]);
+        pts.push((self.x0, self.base_y - first));
+        for (i, h) in self.heights.iter().enumerate() {
+            pts.push((self.x0 + (i as f32 + 0.5) * COL_W, self.base_y - h));
+        }
+        pts.push((self.x0 + n as f32 * COL_W, self.base_y - last));
+        pts
+    }
+
+    fn visible(&self) -> bool {
+        self.heights.iter().any(|&h| h > 0.2)
+    }
+}
+
+/// One output's pile changes: clear `clear`, then draw `piles` clipped to it.
+#[derive(Debug, Clone, Default)]
+pub struct PileScene {
+    pub clear: Vec<Rect>,
+    pub piles: Vec<PileDraw>,
+}
+
+#[derive(Debug, Clone)]
+struct Drawn {
+    x0: f32,
+    y: f32,
+    heights: Vec<f32>,
+    /// Output-local area last drawn.
+    area: Rect,
+}
+
+/// Remembers what each output's piles window shows, to redraw only changes.
+#[derive(Debug, Clone, Default)]
+pub struct PileTracker {
+    drawn: HashMap<SurfaceKey, Drawn>,
+    full: bool,
+}
+
+impl PileTracker {
+    /// Redraw everything next frame.
+    pub fn invalidate(&mut self) {
+        self.full = true;
+        self.drawn.clear();
+    }
+}
+
+/// The output-local rect that columns `c0..c1` of `s` may draw into.
+fn pile_area(s: &Surface, c0: usize, c1: usize, max_h: f32, output: Rect) -> Rect {
+    let x0 = (s.x0 + c0 as f32 * COL_W).floor() as i32 - output.x;
+    let x1 = (s.x0 + c1 as f32 * COL_W).ceil() as i32 - output.x;
+    let y0 = (s.y - max_h - PILE_PAD).floor() as i32 - output.y;
+    let y1 = (s.y + PILE_PAD).ceil() as i32 - output.y;
+    Rect::new(x0, y0, (x1 - x0).max(0) as u32, (y1 - y0).max(0) as u32)
+}
+
+fn clip_to(r: Rect, w: u32, h: u32) -> Option<Rect> {
+    r.intersect(&Rect::new(0, 0, w, h))
+}
+
+/// Columns of `s` whose height moved by `PILE_REDRAW_STEP` since `drawn`.
+fn changed_span(s: &Surface, drawn: &[f32]) -> Option<(usize, usize)> {
+    let mut span: Option<(usize, usize)> = None;
+    for (i, (h, d)) in s.heights.iter().zip(drawn).enumerate() {
+        if (h - d).abs() >= PILE_REDRAW_STEP {
+            span = Some(span.map_or((i, i + 1), |(a, _)| (a, i + 1)));
+        }
+    }
+    span
+}
+
+impl Renderer {
+    /// Build the next piles frame for the output at `output` (global coords).
+    pub fn build_pile_scene(
+        &self,
+        world: &World,
+        output: Rect,
+        tracker: &mut PileTracker,
+        scene: &mut PileScene,
+    ) {
+        scene.clear.clear();
+        scene.piles.clear();
+        let max_h = world.params().max_pile_height;
+        let (w, h) = (output.w, output.h);
+        if std::mem::take(&mut tracker.full) {
+            scene.clear.push(Rect::new(0, 0, w, h));
+        }
+        let mut seen = HashSet::new();
+        for s in world.piles().surfaces() {
+            let whole = pile_area(s, 0, s.heights.len(), max_h, output);
+            if clip_to(whole, w, h).is_none() {
+                continue;
+            }
+            seen.insert(s.key.clone());
+            let span = match tracker.drawn.get_mut(&s.key) {
+                Some(d) if d.x0 == s.x0 && d.y == s.y && d.heights.len() == s.heights.len() => {
+                    let span = changed_span(s, &d.heights);
+                    if let Some((a, b)) = span {
+                        d.heights[a..b].copy_from_slice(&s.heights[a..b]);
+                    }
+                    span
+                }
+                old => {
+                    // New surface, or it moved/resized: clear where it was.
+                    if let Some(d) = old {
+                        scene.clear.extend(clip_to(d.area, w, h));
+                    }
+                    tracker.drawn.insert(
+                        s.key.clone(),
+                        Drawn {
+                            x0: s.x0,
+                            y: s.y,
+                            heights: s.heights.clone(),
+                            area: whole,
+                        },
+                    );
+                    Some((0, s.heights.len()))
+                }
+            };
+            if let Some((a, b)) = span {
+                // One column of margin each side so slopes redraw cleanly.
+                let (a, b) = (a.saturating_sub(1), (b + 1).min(s.heights.len()));
+                scene
+                    .clear
+                    .extend(clip_to(pile_area(s, a, b, max_h, output), w, h));
+            }
+        }
+        tracker.drawn.retain(|key, d| {
+            let keep = seen.contains(key);
+            if !keep {
+                scene.clear.extend(clip_to(d.area, w, h));
+            }
+            keep
+        });
+        self.pile_draws(world, output, scene);
+    }
+
+    /// Every pile part that overlaps a cleared rect (they will be clipped).
+    fn pile_draws(&self, world: &World, output: Rect, scene: &mut PileScene) {
+        for s in world.piles().surfaces() {
+            for r in &scene.clear {
+                let rx0 = (r.x + output.x) as f32;
+                let rx1 = (r.right() + output.x) as f32;
+                let (ry0, ry1) = ((r.y + output.y) as f32, (r.bottom() + output.y) as f32);
+                if s.y + PILE_PAD < ry0 || s.y - world.params().max_pile_height - PILE_PAD > ry1 {
+                    continue;
+                }
+                let c0 = (((rx0 - s.x0) / COL_W).floor().max(0.0) as usize).min(s.heights.len());
+                let c1 = (((rx1 - s.x0) / COL_W).ceil().max(0.0) as usize).min(s.heights.len());
+                if c0 >= c1 {
+                    continue;
+                }
+                let draw = PileDraw {
+                    x0: s.x0 + c0 as f32 * COL_W - output.x as f32,
+                    base_y: s.y - output.y as f32,
+                    heights: s.heights[c0..c1].to_vec(),
+                };
+                if draw.visible() {
+                    scene.piles.push(draw);
+                }
+            }
+        }
+    }
+
+    /// Replay a pile scene into `pixmap` on the CPU (render-test, Wayland).
+    pub fn rasterize_piles(&self, scene: &PileScene, pixmap: &mut Pixmap) {
+        let mut target = Target {
+            w: pixmap.width() as i32,
+            h: pixmap.height() as i32,
+            data: pixmap.data_mut(),
+        };
+        for r in &scene.clear {
+            target.clear(r);
+        }
+        let clip = clip_mask(&scene.clear, pixmap.width(), pixmap.height());
+        for draw in &scene.piles {
+            for (rgba, dy) in [(PILE_SHADOW, PILE_SHADOW_OFFSET), (PILE_FILL, 0.0)] {
+                let Some(path) = pile_path(draw, dy) else {
+                    continue;
+                };
+                let mut paint = Paint::default();
+                paint.set_color_rgba8(rgba[0], rgba[1], rgba[2], rgba[3]);
+                pixmap.fill_path(
+                    &path,
+                    &paint,
+                    FillRule::Winding,
+                    Transform::identity(),
+                    clip.as_ref(),
+                );
+            }
+        }
+    }
+}
+
+/// Closed outline of a pile, shifted down by `dy`.
+fn pile_path(draw: &PileDraw, dy: f32) -> Option<tiny_skia::Path> {
+    let pts = draw.outline();
+    let (first, last) = (pts.first()?, pts.last()?);
+    let mut pb = PathBuilder::new();
+    pb.move_to(first.0, draw.base_y + dy);
+    for (x, y) in &pts {
+        pb.line_to(*x, y + dy);
+    }
+    pb.line_to(last.0, draw.base_y + dy);
+    pb.close();
+    pb.finish()
+}
+
+fn clip_mask(rects: &[Rect], w: u32, h: u32) -> Option<tiny_skia::Mask> {
+    let mut mask = tiny_skia::Mask::new(w, h)?;
+    let mut pb = PathBuilder::new();
+    for r in rects {
+        pb.push_rect(tiny_skia::Rect::from_xywh(
+            r.x as f32, r.y as f32, r.w as f32, r.h as f32,
+        )?);
+    }
+    mask.fill_path(
+        &pb.finish()?,
+        FillRule::Winding,
+        false,
+        Transform::identity(),
+    );
+    Some(mask)
 }
 
 /// Side of a damage tile in pixels. The largest flake sprite is 12 px.
@@ -534,6 +787,67 @@ mod tests {
         d.invalidate();
         d.compute_rects();
         assert_eq!(d.rects, [Rect::new(0, 0, 100, 50)]);
+    }
+
+    fn world_with_panel() -> (World, crate::geom::Inputs) {
+        let mut inputs = inputs_1080p();
+        inputs.obstacles.push(crate::geom::WindowRect {
+            id: 1,
+            rect: Rect::new(0, 1040, 1920, 40),
+        });
+        (World::new(SimParams::default(), 5), inputs)
+    }
+
+    #[test]
+    fn pile_scenes_redraw_only_changes() {
+        let (mut world, inputs) = world_with_panel();
+        let out = inputs.outputs[0].rect;
+        let renderer = Renderer::new();
+        let (mut tracker, mut scene) = (PileTracker::default(), PileScene::default());
+        world.step(1.0 / 60.0, &inputs);
+        renderer.build_pile_scene(&world, out, &mut tracker, &mut scene);
+        assert_eq!(scene.clear.len(), 1, "first frame: the whole panel span");
+        renderer.build_pile_scene(&world, out, &mut tracker, &mut scene);
+        assert!(scene.clear.is_empty(), "nothing changed");
+
+        let (mut incremental, mut full) = (
+            Pixmap::new(out.w, out.h).unwrap(),
+            Pixmap::new(out.w, out.h).unwrap(),
+        );
+        let mut max_area = 0;
+        for frame in 0..3600 {
+            world.step(1.0 / 60.0, &inputs);
+            renderer.build_pile_scene(&world, out, &mut tracker, &mut scene);
+            renderer.rasterize_piles(&scene, &mut incremental);
+            if frame > 0 {
+                max_area = max_area.max(scene.clear.iter().map(|r| r.w * r.h).sum::<u32>());
+            }
+        }
+        // Compare against a full redraw (allowing the sub-threshold lag).
+        let (mut t, mut s) = (PileTracker::default(), PileScene::default());
+        renderer.build_pile_scene(&world, out, &mut t, &mut s);
+        renderer.rasterize_piles(&s, &mut full);
+        let lit = |p: &Pixmap| p.data().chunks(4).filter(|px| px[3] > 128).count() as i64;
+        let (a, b) = (lit(&incremental), lit(&full));
+        assert!(
+            b > 1920 * 3,
+            "a pile should be visible after a minute ({b} px)"
+        );
+        assert!((a - b).abs() < b / 50, "incremental {a} vs full {b}");
+        assert!(max_area < out.w * 60, "a frame redrew {max_area} px²");
+    }
+
+    #[test]
+    fn pile_outline_spans_the_columns() {
+        let d = PileDraw {
+            x0: 10.0,
+            base_y: 100.0,
+            heights: vec![1.0, 3.0],
+        };
+        assert_eq!(
+            d.outline(),
+            [(10.0, 99.0), (11.0, 99.0), (13.0, 97.0), (14.0, 97.0)]
+        );
     }
 
     /// Timing only: `cargo test --release -- --ignored --nocapture bench_render`

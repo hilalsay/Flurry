@@ -64,6 +64,9 @@ pub enum Command {
         out: PathBuf,
         #[arg(long, default_value_t = 1)]
         seed: u64,
+        /// Seconds to simulate before the first frame, so piles can build up.
+        #[arg(long, default_value_t = 0.0)]
+        warmup: f32,
     },
 }
 

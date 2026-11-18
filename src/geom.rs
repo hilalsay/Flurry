@@ -76,8 +76,8 @@ pub struct Inputs {
     pub outputs: Vec<OutputInfo>,
     /// Stacking order: top-most window last.
     pub windows: Vec<WindowRect>,
-    /// Panels, docks, taskbars.
-    pub obstacles: Vec<Rect>,
+    /// Panels, docks, taskbars (id = window id).
+    pub obstacles: Vec<WindowRect>,
     /// `None` when the backend cannot see the cursor (most Wayland desktops).
     pub cursor: Option<CursorState>,
 }

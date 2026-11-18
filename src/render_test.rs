@@ -1,5 +1,6 @@
 //! `flurry render-test`: run the sim headless on a fake 1920×1080 output
-//! and write each frame as a PNG over a dark background.
+//! with a Cinnamon-like bottom panel, and write each frame as a PNG:
+//! background → flakes (behind apps) → panel → piles (on top).
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -10,15 +11,17 @@ use tiny_skia::{
 };
 
 use crate::config::Config;
-use crate::geom::{Inputs, OutputInfo, Rect};
-use crate::render::Renderer;
+use crate::geom::{Inputs, OutputInfo, Rect, WindowRect};
+use crate::render::{PileScene, PileTracker, Renderer};
 use crate::sim::{SimParams, World};
 
 const W: u32 = 1920;
 const H: u32 = 1080;
 const DT: f32 = 1.0 / 60.0;
+const PANEL: Rect = Rect::new(0, H as i32 - 40, W, 40);
 
-pub fn run(config: &Config, frames: u32, out: &Path, seed: u64) -> Result<()> {
+/// `warmup`: seconds to simulate before the first frame (lets piles build up).
+pub fn run(config: &Config, frames: u32, out: &Path, seed: u64, warmup: f32) -> Result<()> {
     std::fs::create_dir_all(out).with_context(|| format!("cannot create {}", out.display()))?;
     let output = OutputInfo {
         name: "FAKE-1".into(),
@@ -27,12 +30,18 @@ pub fn run(config: &Config, frames: u32, out: &Path, seed: u64) -> Result<()> {
     };
     let inputs = Inputs {
         outputs: vec![output.clone()],
+        obstacles: vec![WindowRect { id: 1, rect: PANEL }],
         ..Inputs::default()
     };
     let mut world = World::new(SimParams::from_config(config), seed);
+    for _ in 0..(warmup / DT) as u32 {
+        world.step(DT, &inputs);
+    }
+    let mut piles = Pixmap::new(W, H).context("cannot allocate pixmap")?;
     let renderer = Renderer::new();
     let mut snow = Pixmap::new(W, H).context("cannot allocate pixmap")?;
     let background = background()?;
+    let panel = panel()?;
     let mut frame = background.clone();
     let (mut sim_time, mut render_time) = (Duration::ZERO, Duration::ZERO);
 
@@ -43,17 +52,28 @@ pub fn run(config: &Config, frames: u32, out: &Path, seed: u64) -> Result<()> {
 
         let t = Instant::now();
         renderer.render(&world, output.rect, &mut snow);
+        let mut pile_scene = PileScene::default();
+        renderer.build_pile_scene(
+            &world,
+            output.rect,
+            &mut PileTracker::default(),
+            &mut pile_scene,
+        );
+        piles.fill(Color::TRANSPARENT);
+        renderer.rasterize_piles(&pile_scene, &mut piles);
         render_time += t.elapsed();
 
         frame.data_mut().copy_from_slice(background.data());
-        frame.draw_pixmap(
-            0,
-            0,
-            snow.as_ref(),
-            &PixmapPaint::default(),
-            Transform::identity(),
-            None,
-        );
+        for layer in [&snow, &panel, &piles] {
+            frame.draw_pixmap(
+                0,
+                0,
+                layer.as_ref(),
+                &PixmapPaint::default(),
+                Transform::identity(),
+                None,
+            );
+        }
         let path = out.join(format!("frame_{i:04}.png"));
         frame
             .save_png(&path)
@@ -90,6 +110,22 @@ fn background() -> Result<Pixmap> {
         ..Paint::default()
     };
     let rect = tiny_skia::Rect::from_xywh(0.0, 0.0, W as f32, H as f32).context("bad rect")?;
+    pm.fill_rect(rect, &paint, Transform::identity(), None);
+    Ok(pm)
+}
+
+/// A dark, slightly translucent bottom panel like Mint's default.
+fn panel() -> Result<Pixmap> {
+    let mut pm = Pixmap::new(W, H).context("cannot allocate pixmap")?;
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(38, 40, 46, 240);
+    let rect = tiny_skia::Rect::from_xywh(
+        PANEL.x as f32,
+        PANEL.y as f32,
+        PANEL.w as f32,
+        PANEL.h as f32,
+    )
+    .context("bad rect")?;
     pm.fill_rect(rect, &paint, Transform::identity(), None);
     Ok(pm)
 }

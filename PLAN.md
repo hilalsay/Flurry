@@ -237,8 +237,9 @@ Unknown keys are rejected with an error, so typos don't fail silently.
 - Fullscreen detection: active window (`_NET_ACTIVE_WINDOW`) has `_NET_WM_STATE_FULLSCREEN`.
 
 ### Cinnamon specifics
-- **Panel** = a window with `_NET_WM_WINDOW_TYPE_DOCK` (owned by `cinnamon`); also read
-  `_NET_WM_STRUT_PARTIAL`. The bottom panel's top edge is the **main pile** and must always collect
+- **Panel**: Cinnamon draws its panels inside the shell, so they are **not** X windows (see
+  DECISIONS.md). Derive them from the per-monitor work area (`_GTK_WORKAREAS_D<n>` /
+  `_NET_WORKAREA`); other desktops' `_NET_WM_WINDOW_TYPE_DOCK` windows are used too. The bottom panel's top edge is the **main pile** and must always collect
   snow. Top and side panels collect only on an upward-facing visible edge. Handle auto-hide and
   size changes (re-read on `ConfigureNotify` / `PropertyNotify`).
 - **Windows that collect snow:** normal windows that are **not** maximized
@@ -317,8 +318,8 @@ The first instance owns the socket; later invocations send the command and exit.
 | 0 | Scaffold | ✅ |
 | 1 | Simulation + headless rendering | ✅ |
 | 2 | X11 overlay | ✅ (manual check by me) |
-| 3 | Controls: tray, CLI/IPC, global hotkey | |
-| 4 | Two-window layering + piles on panel and screen bottom | |
+| 3 | Controls: tray, CLI/IPC, global hotkey | ✅ |
+| 4 | Two-window layering + piles on panel and screen bottom | ✅ (manual check by me) |
 | 5 | Piles on windows | |
 | 6 | Snowballs and snowman | |
 | 7 | Being a good citizen (auto-pause, battery, autostart) | |
