@@ -34,6 +34,8 @@ pub enum Command {
     Wake,
     /// Internal: new real weather (feature 5).
     Weather(crate::weather::Effect),
+    /// Internal: a bass hit in the music (feature 7), strength 0.2..=2.
+    Gust(f32),
 }
 
 impl Command {
@@ -52,6 +54,7 @@ impl Command {
             }
             Command::Wake => "wake".into(),
             Command::Weather(e) => format!("weather {e:?}"),
+            Command::Gust(s) => format!("gust {s:.2}"),
         }
     }
 

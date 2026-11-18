@@ -226,3 +226,11 @@ decided and why.
   direction changes of the pointer at ≥ 900 px/s within 0.8 s count as a shake. 70% of the snow on
   piles within 260 px of the pointer is lifted (snow is conserved), as particles thrown upward and
   counter-clockwise around the pointer. They whirl, fall and settle again. 1.5 s cooldown.
+- **Phase 8 / feature 7, music makes wind** (opt-in: `features.music_wind = false`). Plan option
+  "`pw-cat --record` from the monitor source": implemented with **`parec --device=@DEFAULT_MONITOR@`**
+  (PipeWire's PulseAudio layer, present on Mint), as 8 kHz mono s16. No extra crate is needed, so
+  nothing new to justify. A two-stage 150 Hz low-pass (one stage let loud hi-hats through), RMS per
+  50 ms, and a hit when a window is > 1.6× the ~2 s running average and above a noise floor, at most
+  every 350 ms. Each hit kicks a 0.9 s gust (70 px/s × strength 0.2–2), alternating left/right so the
+  snow sways with the beat. Only a level is computed; no audio is kept or sent anywhere. `parec` is
+  killed on exit (checked: none left after `flurry quit`).

@@ -127,11 +127,29 @@ pub fn run(config: Config, opts: &RunOptions) -> Result<()> {
     if config.features.real_weather {
         crate::weather::watch(config.features.weather_city.clone(), tx.clone());
     }
+    let _music = if config.features.music_wind {
+        crate::music::watch(tx.clone())
+            .map_err(|e| log::warn!("music makes wind is off: {e:#}"))
+            .ok()
+            .map(KillOnDrop)
+    } else {
+        None
+    };
     let tray = Tray::spawn(tx, tray_state(&config, false));
     let mut main = MainLoop::new(config, opts.config_path.clone(), backend.as_mut(), rx, tray);
     let result = main.run();
     log::info!("stopping");
     result
+}
+
+/// Stops a helper process when flurry exits.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 fn tray_state(config: &Config, paused: bool) -> TrayState {
@@ -429,6 +447,12 @@ impl<'b> MainLoop<'b> {
             Command::Quit => return Ok(("quitting".into(), Flow::Quit)),
             Command::Auto(reason, on) => {
                 self.set_auto(reason, on)?;
+                "ok".into()
+            }
+            Command::Gust(strength) => {
+                if self.showing {
+                    self.world.gust(strength);
+                }
                 "ok".into()
             }
             Command::Weather(e) => {

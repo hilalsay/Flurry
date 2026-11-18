@@ -8,6 +8,7 @@ pub mod config;
 pub mod geom;
 pub mod heat;
 pub mod ipc;
+pub mod music;
 pub mod platform;
 pub mod power;
 pub mod render;

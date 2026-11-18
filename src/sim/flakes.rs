@@ -263,6 +263,9 @@ pub struct Wind {
     gust: Option<Gust>,
     next_gust_at: f64,
     current: f32,
+    /// Time of the last update, and the side of the last kick.
+    now: f64,
+    kick_side: f32,
 }
 
 /// Mean drift to the right, px/s.
@@ -278,6 +281,8 @@ impl Wind {
             gust: None,
             next_gust_at,
             current: 0.0,
+            now: 0.0,
+            kick_side: 1.0,
         }
     }
 
@@ -294,8 +299,19 @@ impl Wind {
         self.gust.is_some()
     }
 
+    /// A short gust right now (music), alternating left and right.
+    pub fn kick(&mut self, strength: f32) {
+        self.kick_side = -self.kick_side;
+        self.gust = Some(Gust {
+            start: self.now,
+            duration: 0.9,
+            peak: self.kick_side * 70.0 * strength.clamp(0.0, 2.0),
+        });
+    }
+
     /// Recompute the wind for absolute sim time `t` (seconds).
     pub fn update(&mut self, t: f64) {
+        self.now = t;
         let base = BASE_DRIFT + 18.0 * phase_sin(t, 0.11, 0.0) + 10.0 * phase_sin(t, 0.29, 1.7);
         self.current = self.strength * (base + self.gust_value(t));
     }

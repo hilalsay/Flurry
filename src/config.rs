@@ -89,6 +89,8 @@ pub struct Features {
     pub frost_idle_minutes: f32,
     /// Shaking the mouse whirls settled snow up like a snow globe.
     pub snow_globe: bool,
+    /// Opt-in: bass in the music you play makes wind gusts.
+    pub music_wind: bool,
     /// Opt-in: follow the real weather of `weather_city` (Open-Meteo).
     pub real_weather: bool,
     /// City name for real weather mode, e.g. "Istanbul". Never auto-detected.
@@ -104,6 +106,7 @@ impl Default for Features {
             frost: true,
             frost_idle_minutes: 3.0,
             snow_globe: true,
+            music_wind: false,
             real_weather: false,
             weather_city: String::new(),
         }

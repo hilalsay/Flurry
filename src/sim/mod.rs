@@ -145,6 +145,11 @@ impl World {
         }
     }
 
+    /// A wind gust right now (music makes wind).
+    pub fn gust(&mut self, strength: f32) {
+        self.wind.kick(strength);
+    }
+
     /// Snowballs and snowmen.
     pub fn snowfolk(&self) -> &Snowfolk {
         &self.snowfolk
