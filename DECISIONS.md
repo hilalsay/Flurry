@@ -305,3 +305,9 @@ decided and why.
   scarf, buttons and stick arms. Checked live with synthetic XTest input: rolled three balls of
   similar size (r ≈ 10), carried two of them with plain clicks (the script checked that the pointer
   was over flurry's window before each press), and a snowman was built.
+- **A fast mouse swipe knocks icicles off** (user request: "icicles should fall when the mouse is
+  moved quickly over them"). When the cursor moves at ≥ 500 px/s, its path since its last move is
+  sampled every 2 px. Every hanging icicle it passes through (±3 px, and not hidden behind a window
+  above) snaps off. It falls with 15% of the swipe's velocity and shatters into loose snow, the same
+  as when a window is flung. The icicle regrows from zero while the window keeps its snow. Slow
+  hovering does nothing. Test: `a_fast_swipe_knocks_icicles_off_a_slow_one_does_not`.

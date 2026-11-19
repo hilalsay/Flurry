@@ -1,7 +1,9 @@
 //! Icicles (feature 2): they grow slowly from the bottom edge of a window
 //! whose top has had snow for a while (not from the panel: the user found
-//! them distracting there). They drip now and then. Flinging the window snaps them off: they
-//! fall and shatter into loose snow. Without snow they slowly melt away.
+//! them distracting there). They drip now and then. Flinging the window
+//! snaps them off, and so does a fast mouse swipe through them (they regrow
+//! while the snow stays): they fall and shatter into loose snow. Without
+//! snow they slowly melt away.
 
 use std::collections::HashMap;
 
@@ -20,6 +22,10 @@ const MELT: f32 = 0.15;
 const SPACING: f32 = 55.0;
 const DRIPS_PER_SEC: f32 = 0.03;
 const GRAVITY: f32 = 700.0;
+/// A cursor moving at least this fast (px/s) knocks icicles off.
+const SWIPE_SPEED: f32 = 500.0;
+/// Extra px around an icicle that the swipe still hits.
+const SWIPE_MARGIN: f32 = 3.0;
 
 /// What an edge belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -50,6 +56,19 @@ struct Edge {
 /// stacking depth, and where it hangs (left x, y, width).
 type EdgeNow = (EdgeKey, SurfaceKey, i32, (f32, f32, f32));
 
+/// A cursor path: from, to, velocity.
+type SwipePath = ((f32, f32), (f32, f32), (f32, f32));
+
+/// Does any point along the segment `from`–`to` (every 2 px) satisfy `hit`?
+fn swipe_point(from: (f32, f32), to: (f32, f32), hit: impl Fn(f32, f32) -> bool) -> bool {
+    let len = (to.0 - from.0).hypot(to.1 - from.1);
+    let n = (len / 2.0).ceil().max(1.0) as usize;
+    (0..=n).any(|i| {
+        let t = i as f32 / n as f32;
+        hit(from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
+    })
+}
+
 /// One icicle to draw, in global coordinates: it hangs from (`x`, `y`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Icicle {
@@ -76,6 +95,10 @@ pub struct Icicles {
     falling: Vec<Falling>,
     next_falling: u64,
     rng: fastrand::Rng,
+    /// Simulated time (s), and the last cursor position that differed
+    /// from the one before, with when it was seen.
+    clock: f32,
+    cursor: Option<(f32, f32, f32)>,
 }
 
 impl Default for Icicles {
@@ -85,6 +108,8 @@ impl Default for Icicles {
             falling: Vec::new(),
             next_falling: 1 << 48,
             rng: fastrand::Rng::with_seed(0x01C1_C1E5),
+            clock: 0.0,
+            cursor: None,
         }
     }
 }
@@ -225,7 +250,74 @@ impl Icicles {
                 edge.seeds.clear();
             }
         }
+        self.swipe(dt, inputs);
         self.fall(dt, piles, particles, bounds);
+    }
+
+    /// The cursor's path since its last move, if it moved fast enough to
+    /// knock icicles off.
+    fn track_swipe(&mut self, dt: f32, inputs: &Inputs) -> Option<SwipePath> {
+        self.clock += dt;
+        let c = inputs.cursor.as_ref()?;
+        let (x, y) = (c.x, c.y);
+        let Some((px, py, t)) = self.cursor else {
+            self.cursor = Some((x, y, self.clock));
+            return None;
+        };
+        if (px, py) == (x, y) {
+            return None;
+        }
+        self.cursor = Some((x, y, self.clock));
+        let elapsed = (self.clock - t).max(1.0 / 120.0);
+        let (vx, vy) = ((x - px) / elapsed, (y - py) / elapsed);
+        (vx.hypot(vy) >= SWIPE_SPEED).then_some(((px, py), (x, y), (vx, vy)))
+    }
+
+    /// Knock off every hanging icicle a fast cursor swipe went through,
+    /// unless a window above it hides it there.
+    fn swipe(&mut self, dt: f32, inputs: &Inputs) {
+        let Some((from, to, v)) = self.track_swipe(dt, inputs) else {
+            return;
+        };
+        let hidden = |x: f32, y: f32, z: i32| {
+            inputs
+                .windows
+                .iter()
+                .enumerate()
+                .any(|(wz, w)| wz as i32 > z && w.rect.contains(x as i32, y as i32))
+        };
+        let mut knocked = Vec::new();
+        for e in self.edges.values_mut() {
+            let (x0, y, _) = e.at;
+            for s in e.seeds.iter_mut().filter(|s| s.length >= 1.0) {
+                let (ix, half) = (x0 + s.offset, s.width / 2.0 + SWIPE_MARGIN);
+                let hit = swipe_point(from, to, |px, py| {
+                    (px - ix).abs() <= half
+                        && py >= y - SWIPE_MARGIN
+                        && py <= y + s.length + SWIPE_MARGIN
+                        && !hidden(px, py, e.z)
+                });
+                if hit {
+                    knocked.push((ix, y, s.length, s.width));
+                    s.length = 0.0;
+                }
+            }
+        }
+        for (x, y, length, width) in knocked {
+            self.next_falling += 1;
+            self.falling.push(Falling {
+                icicle: Icicle {
+                    id: self.next_falling,
+                    x,
+                    y,
+                    length,
+                    width,
+                    z: i32::MAX,
+                },
+                vx: (v.0 * 0.15).clamp(-250.0, 250.0),
+                vy: (v.1 * 0.15).clamp(-100.0, 150.0),
+            });
+        }
     }
 
     fn drop_all(&mut self, e: &Edge, v: (f32, f32)) {
@@ -401,5 +493,43 @@ mod tests {
             );
         }
         assert!(ice.all().is_empty());
+    }
+
+    #[test]
+    fn a_fast_swipe_knocks_icicles_off_a_slow_one_does_not() {
+        let win = Rect::new(400, 300, 600, 400);
+        let bounds = Rect::new(0, 0, 1920, 1080);
+        let (mut ice, mut piles, mut parts) =
+            (Icicles::default(), Piles::default(), Particles::new(0));
+        let mut inp = inputs(win);
+        snowy(&mut piles, &inp, &mut parts);
+        for _ in 0..60 * 90 {
+            ice.step(1.0 / 60.0, &inp, &mut piles, &mut parts, bounds);
+        }
+        let hanging = ice.all().len();
+        assert!(hanging >= 5);
+        let at = |x: f32| {
+            Some(crate::geom::CursorState {
+                x,
+                y: 702.0,
+                ..Default::default()
+            })
+        };
+        let mut run = |ice: &mut Icicles, inp: &mut Inputs, from: f32, to: f32, speed: f32| {
+            let mut x = from;
+            while x < to {
+                x += speed / 60.0;
+                inp.cursor = at(x);
+                ice.step(1.0 / 60.0, inp, &mut piles, &mut parts, bounds);
+            }
+        };
+        // Slowly along the bottom edge: nothing falls.
+        run(&mut ice, &mut inp, 380.0, 1020.0, 200.0);
+        assert!(ice.all().iter().all(|i| i.z != i32::MAX), "slow: none fell");
+        // A fast swipe along the edge: they all snap off and fall.
+        run(&mut ice, &mut inp, 380.0, 1020.0, 1500.0);
+        let all = ice.all();
+        let falling = all.iter().filter(|i| i.z == i32::MAX).count();
+        assert_eq!(falling, hanging, "fast: all knocked off");
     }
 }
