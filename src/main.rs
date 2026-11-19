@@ -67,6 +67,7 @@ fn send_command(cmd: Command) -> Result<()> {
     let cmd = match cmd {
         Command::Toggle => ipc::Command::Toggle,
         Command::Clear => ipc::Command::Clear,
+        Command::Tornado => ipc::Command::Tornado,
         Command::Intensity { level } => ipc::Command::Intensity(level),
         Command::Fps { fps } => ipc::Command::Fps(fps),
         Command::Play => ipc::Command::Play,

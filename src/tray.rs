@@ -122,6 +122,12 @@ impl ksni::Tray for FlurryTray {
             }
             .into(),
             StandardItem {
+                label: "Tornado! (snow storm)".into(),
+                activate: Box::new(|t: &mut Self| t.send(Command::Tornado)),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
                 label: "Clear snow".into(),
                 activate: Box::new(|t: &mut Self| t.send(Command::Clear)),
                 ..Default::default()

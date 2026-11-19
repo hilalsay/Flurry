@@ -130,6 +130,11 @@ pub struct Snowman {
 }
 
 impl Snowman {
+    /// Stacking depth of what it stands on (like `Surface::z`).
+    pub fn depth(&self, piles: &Piles) -> i32 {
+        piles.surface(&self.key).map_or(i32::MAX, |s| s.z)
+    }
+
     /// Bounding box (global), including arms and hat room.
     pub fn bounds(&self) -> Rect {
         let [b, m, t] = self.radii;
@@ -166,6 +171,17 @@ pub struct Env<'a> {
     pub particles: &'a mut Particles,
     pub bounds: Rect,
     pub max_pile_height: f32,
+    /// Windows and panels with their stacking depth (see `World::occluders`).
+    pub occluders: &'a [(i32, Rect)],
+}
+
+impl Env<'_> {
+    /// Is (`x`, `y`) on something at depth `z` hidden by a window above it?
+    pub fn covered(&self, x: f32, y: f32, z: i32) -> bool {
+        self.occluders
+            .iter()
+            .any(|(oz, r)| *oz > z && r.contains(x as i32, y as i32))
+    }
 }
 
 pub fn modifier_held(carry: CarryModifier, c: &CursorState) -> bool {
@@ -188,6 +204,53 @@ impl Snowfolk {
     pub fn clear(&mut self) {
         self.balls.clear();
         self.men.clear();
+    }
+
+    /// Stacking depth of ball `i`: that of the surface it rests on (through
+    /// any balls below it), or on top of everything while it flies or is
+    /// carried. Windows stacked above that depth hide it.
+    pub fn ball_depth(&self, i: usize, piles: &Piles) -> i32 {
+        let mut b = &self.balls[i];
+        for _ in 0..self.balls.len() {
+            match &b.state {
+                State::OnSurface { key, .. } => {
+                    return piles.surface(key).map_or(i32::MAX, |s| s.z);
+                }
+                State::OnBall { id, .. } => match self.balls.iter().find(|o| o.id == *id) {
+                    Some(o) => b = o,
+                    None => return i32::MAX,
+                },
+                State::Free { .. } | State::Carried { .. } => return i32::MAX,
+            }
+        }
+        i32::MAX
+    }
+
+    /// Throw resting balls and snowmen where `hit(x, y)` gives a velocity
+    /// (the tornado). Snowmen fall apart into their three balls.
+    pub fn blow(&mut self, mut hit: impl FnMut(f32, f32) -> Option<(f32, f32)>) {
+        for b in &mut self.balls {
+            if !b.resting() {
+                continue;
+            }
+            if let Some(v) = hit(b.x, b.y) {
+                b.state = State::Free { fall_from: b.y };
+                (b.vx, b.vy) = v;
+            }
+        }
+        let mut hits = Vec::new();
+        let mut kept = Vec::new();
+        for m in self.men.drain(..) {
+            let mid_y = m.base - m.radii[0];
+            match hit(m.x, mid_y) {
+                Some(v) => hits.push((m, v)),
+                None => kept.push(m),
+            }
+        }
+        self.men = kept;
+        for (m, v) in hits {
+            self.break_snowman(&m, v);
+        }
     }
 
     pub fn is_carrying(&self) -> bool {
@@ -332,9 +395,10 @@ impl Snowfolk {
                 .balls
                 .iter()
                 .enumerate()
-                .filter(|(_, b)| {
+                .filter(|(i, b)| {
                     (b.x - c.x).hypot(b.y - c.y) <= b.radius() + GRAB_MARGIN
                         && (any_part || c.y <= b.y)
+                        && !env.covered(c.x, c.y, self.ball_depth(*i, env.piles))
                 })
                 .min_by(|(_, a), (_, b)| a.radius().total_cmp(&b.radius()))
                 .map(|(i, _)| i);
@@ -361,8 +425,15 @@ impl Snowfolk {
         // pointer, so a sweep keeps rolling the same ball.
         let push = vx.clamp(-MAX_PUSH_SPEED, MAX_PUSH_SPEED);
         let dir = vx.signum();
-        if let Some(b) = self.balls.iter_mut().find(|b| {
+        let depths: Vec<i32> = (0..self.balls.len())
+            .map(|i| self.ball_depth(i, env.piles))
+            .collect();
+        let hidden = |i: usize| env.covered(c.x, c.y, depths[i]);
+        if let Some((_, b)) = self.balls.iter_mut().enumerate().find(|(i, b)| {
             let r = b.radius();
+            if hidden(*i) {
+                return false;
+            }
             // From its middle down into the snow it sits on; the upper half
             // is for picking it up.
             (b.x - c.x).abs() <= r + GRAB_MARGIN && c.y > b.y && c.y <= b.y + r + 12.0
@@ -393,6 +464,10 @@ impl Snowfolk {
         let Some((key, _)) = env.piles.snow_at(c.x, c.y, 2.0) else {
             return;
         };
+        let z = env.piles.surface(&key).map_or(i32::MAX, |s| s.z);
+        if env.covered(c.x, c.y, z) {
+            return;
+        }
         let volume = env.piles.take(&key, c.x, 5.0, 4.0);
         if volume < START_VOLUME * 0.5 {
             return;
@@ -714,6 +789,7 @@ mod tests {
         piles: Piles,
         particles: Particles,
         now: f64,
+        occluders: Vec<(i32, Rect)>,
     }
 
     impl Rig {
@@ -723,6 +799,7 @@ mod tests {
                 piles: piles(snow),
                 particles: Particles::new(1),
                 now: 0.0,
+                occluders: Vec::new(),
             }
         }
 
@@ -737,6 +814,7 @@ mod tests {
                 particles: &mut self.particles,
                 bounds: BOUNDS,
                 max_pile_height: 40.0,
+                occluders: &self.occluders,
             };
             self.folk.step(&mut env);
         }
@@ -997,5 +1075,74 @@ mod tests {
         let (a, b) = (&rig.folk.balls()[0], &rig.folk.balls()[1]);
         assert!(b.x > 545.0, "the second ball was pushed: {}", b.x);
         assert!((b.x - a.x) >= a.radius() + b.radius() - 1.0, "no overlap");
+    }
+
+    #[test]
+    fn a_ball_behind_a_window_cannot_be_grabbed_or_pushed() {
+        use crate::geom::AppWindow;
+        let mut rig = Rig::new(8.0);
+        // A snowy window (z 0) with a ball on it, and another window (z 1)
+        // stacked above, covering it.
+        let back = Rect::new(300, 500, 600, 300);
+        let inputs = Inputs {
+            outputs: vec![OutputInfo {
+                name: "A".into(),
+                rect: BOUNDS,
+                scale: 1.0,
+            }],
+            windows: vec![AppWindow {
+                id: 5,
+                rect: back,
+                collects: true,
+                pid: None,
+            }],
+            ..Inputs::default()
+        };
+        rig.piles = Piles::default();
+        rig.piles
+            .sync(&inputs, 40.0, 1.0, 0.0, &mut Particles::new(0));
+        for x in (300..900).step_by(4) {
+            rig.piles.land(x as f32, 450.0, 505.0, 1.0, 32.0, 40.0);
+        }
+        let key = SurfaceKey::Window(5);
+        let surf = rig.piles.surface(&key).unwrap().clone();
+        let (x, volume) = (600.0, 400.0);
+        let r = radius_of(volume);
+        let y = surf.top_at(x).unwrap() - r;
+        rig.folk.balls.push(Snowball {
+            id: 1,
+            x,
+            y,
+            vx: 0.0,
+            vy: 0.0,
+            volume,
+            state: State::OnSurface {
+                key,
+                offset: x - surf.x0,
+            },
+            settled: 1.0,
+        });
+        rig.occluders = vec![(0, back), (1, Rect::new(0, 0, 1920, 1000))];
+        let at = |x, y, left_down| CursorState {
+            x,
+            y,
+            left_down,
+            ..CursorState::default()
+        };
+        rig.step(Some(at(x, y - r * 0.5, false)), CarryModifier::Alt);
+        rig.step(Some(at(x, y - r * 0.5, true)), CarryModifier::Alt);
+        assert!(!rig.folk.is_carrying(), "hidden: not picked up");
+        rig.step(Some(at(x, y - r * 0.5, false)), CarryModifier::Alt);
+        // Sweeping through it at snow level doesn't push it either.
+        for k in 0..30 {
+            let cx = x - 30.0 + 4.0 * k as f32;
+            rig.step(Some(at(cx, y + r * 0.5, false)), CarryModifier::Alt);
+        }
+        assert!((rig.folk.balls()[0].x - x).abs() < 0.5, "not pushed");
+        assert_eq!(rig.folk.balls().len(), 1, "and nothing scooped");
+        // Uncovered, the same click picks it up.
+        rig.occluders = vec![(0, back)];
+        rig.step(Some(at(x, y - r * 0.5, true)), CarryModifier::Alt);
+        assert!(rig.folk.is_carrying());
     }
 }

@@ -45,6 +45,7 @@ flurry --install-autostart    # start it at every login (--remove-autostart to u
 | `flurry intensity light\|medium\|heavy` | how much snow |
 | `flurry fps 60` | smoother (30 is the default and uses half the CPU) |
 | `flurry clear` | sweep away all settled snow |
+| `flurry tornado` | a 30-second snow storm with a tornado (also in the tray menu) |
 | `flurry status` | what it's doing right now |
 | `flurry reload` | re-read the config file |
 | `flurry quit` | stop |
@@ -62,6 +63,10 @@ The tray menu has the same controls.
   scarf and stick arms (the snow rearranges so the biggest ball ends up at the bottom).
 - **Write in the snow**: hold **Alt** and drag through a deep pile.
 - **Snow globe**: shake the mouse fast from side to side.
+- **Tornado**: `flurry tornado` or *Tornado!* in the tray menu. The wind rises, snow falls harder,
+  and a funnel of swirling snow crosses the screen behind your windows. It sucks up the snow piles
+  it passes and throws snowballs and snowmen. It's over after 30 seconds.
+- **Icicles**: swipe the mouse fast through the icicles under a window to knock them off.
 - **Frost**: leave the mouse alone for a few minutes. Move it to wipe the frost away.
 - Typing knocks little clumps of snow off the window you type in, and busy programs (a compiler, a
   game) melt their window's snow faster.

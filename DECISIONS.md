@@ -311,3 +311,31 @@ decided and why.
   above) snaps off. It falls with 15% of the swipe's velocity and shatters into loose snow, the same
   as when a window is flung. The icicle regrows from zero while the window keeps its snow. Slow
   hovering does nothing. Test: `a_fast_swipe_knocks_icicles_off_a_slow_one_does_not`.
+- **Snowballs and snowmen are hidden by windows stacked above them** (user report: "the balls of
+  another window are on top of the other full screen page"). They were drawn on the always-on-top
+  piles window with no occlusion. Now each ball gets the stacking depth of the surface it rests on
+  (through balls under it). Flying or carried balls are on top. Its image is clipped by the windows
+  above that depth, like piles and icicles already were. The clickable area of a hidden ball is cut
+  the same way, so it no longer steals clicks from the window covering it. A covered ball can't be
+  picked up, pushed, or scooped from. Test: `a_ball_behind_a_window_cannot_be_grabbed_or_pushed`.
+- **Tornado / snow storm** (user request: "add a tornado option with a snow storm"). On demand
+  only: `flurry tornado` or the tray's *Tornado!* item. Not random, and no config key, because it
+  costs CPU. It lasts 30 s and eases in and out:
+  - the wind rises (up to ±150 px/s, gusty);
+  - there are up to 1.8× the normal number of flakes;
+  - from ~3 s, a funnel 75% of the screen height forms at the bottom and travels from 10% to 90% of
+    the width, wandering and swaying. It is drawn as 520 swirling bits on the flakes layer, so like
+    all falling snow it stays **behind** app windows; the front of the funnel uses the near layer.
+  Falling flakes near the funnel are pulled in, circle it and are carried up. Snow piles under its
+  foot (lowest 35%) are sucked up (900 px²/s) and flung out as loose snow, which lands elsewhere.
+  Resting snowballs are thrown, and snowmen fall apart into balls.
+  Measured on this laptop at 30 fps: normal snow is now ~9% total (flurry 2.1%); during a storm
+  ~14% total (flurry 4.9%). That's over the 12% budget, but only for the 30 s the user asked for.
+  Two optimizations came with this:
+  - `rasterize_piles` reuses one clip mask and only fills/zeroes the damaged rects, instead of
+    building a 2 MB mask each frame (frame draw time 2.3 → ~1.3 ms in a storm);
+  - `coalesce` no longer merges >64 small damage rects into one screen-sized box, which had been
+    uploading most of the screen every frame while snow was flying. It merges per 128 px cell only
+    where that stays compact.
+  Tests: `storm_eases_in_and_out_and_ends`, `the_funnel_crosses_the_screen`,
+  `a_tornado_storm_blows_and_ends`, `coalesce_merges_overlap_and_clips`.

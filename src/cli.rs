@@ -44,6 +44,8 @@ pub enum Command {
     Toggle,
     /// Remove all settled snow.
     Clear,
+    /// Start a 30-second snow storm with a tornado.
+    Tornado,
     /// Change snowfall intensity.
     Intensity {
         #[arg(value_enum)]

@@ -248,6 +248,9 @@ pub struct Scene {
 pub struct Renderer {
     sheet: SpriteSheet,
     images: ImageSheet,
+    /// Reused clip mask for `rasterize_piles`: all zero between calls, so
+    /// each frame only touches its damaged rects (not 2 MB per frame).
+    mask: RefCell<Option<tiny_skia::Mask>>,
 }
 
 impl Default for Renderer {
@@ -261,6 +264,7 @@ impl Renderer {
         Self {
             sheet: SpriteSheet::new(),
             images: ImageSheet::default(),
+            mask: RefCell::new(None),
         }
     }
 
@@ -281,9 +285,18 @@ impl Renderer {
         damage.cur.fill(false);
         scene.draws.clear();
         let (w, h) = (output.w as i32, output.h as i32);
+        let swirl = world.swirl();
         for layer in Layer::ALL {
-            for f in world.flakes().iter().filter(|f| f.layer == layer) {
-                let draw = self.place(f, output);
+            let flakes = world
+                .flakes()
+                .iter()
+                .filter(|f| f.layer == layer)
+                .map(|f| self.place(f, output));
+            let bits = swirl
+                .iter()
+                .filter(|b| b.layer == layer)
+                .map(|b| self.place_at(b.x, b.y, b.r, layer, output));
+            for draw in flakes.chain(bits) {
                 let size = self.sheet.get(draw.sprite).size as i32;
                 if draw.x + size <= 0 || draw.y + size <= 0 || draw.x >= w || draw.y >= h {
                     continue;
@@ -432,11 +445,13 @@ pub struct PileScene {
 }
 
 /// Draw image `image` of the [`ImageSheet`] with its top-left at (`x`, `y`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageDraw {
     pub image: u32,
     pub x: i32,
     pub y: i32,
+    /// Output-local parts hidden by windows stacked above what it stands on.
+    pub holes: Vec<Rect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -785,28 +800,41 @@ impl Renderer {
     ) {
         scene.images.clear();
         let mut now: Vec<(ImageDraw, Rect)> = Vec::new();
-        let mut add = |key, x: f32, y: f32| {
+        let mut add = |key, x: f32, y: f32, z: i32| {
             let Some((image, w, h, (ax, ay))) = self.images.get(key) else {
                 return;
             };
+            let (dx, dy) = (
+                x.round() as i32 - output.x - ax,
+                y.round() as i32 - output.y - ay,
+            );
+            let rect = Rect::new(dx, dy, w, h);
+            if clip_to(rect, output.w, output.h).is_none() {
+                return;
+            }
+            let holes = world
+                .occluders()
+                .filter(|(oz, _)| *oz > z)
+                .map(|(_, r)| Rect::new(r.x - output.x, r.y - output.y, r.w, r.h))
+                .filter_map(|r| r.intersect(&rect))
+                .collect();
             let draw = ImageDraw {
                 image,
-                x: x.round() as i32 - output.x - ax,
-                y: y.round() as i32 - output.y - ay,
+                x: dx,
+                y: dy,
+                holes,
             };
-            let rect = Rect::new(draw.x, draw.y, w, h);
-            if clip_to(rect, output.w, output.h).is_some() {
-                now.push((draw, rect));
-            }
+            now.push((draw, rect));
         };
         let folk = world.snowfolk();
+        let piles = world.piles();
         for m in folk.snowmen() {
             let r = m.radii.map(|r| r.round() as u16);
-            add(ImageKey::Snowman(r), m.x, m.base);
+            add(ImageKey::Snowman(r), m.x, m.base, m.depth(piles));
         }
-        for b in folk.balls() {
+        for (i, b) in folk.balls().iter().enumerate() {
             let half = (b.radius() * 2.0).round() as u16;
-            add(ImageKey::Ball(half), b.x, b.y);
+            add(ImageKey::Ball(half), b.x, b.y, folk.ball_depth(i, piles));
         }
         if now != tracker.images {
             let (w, h) = (output.w, output.h);
@@ -814,7 +842,7 @@ impl Renderer {
                 scene.clear.extend(clip_to(*r, w, h));
             }
         }
-        scene.images.extend(now.iter().map(|(d, _)| *d));
+        scene.images.extend(now.iter().map(|(d, _)| d.clone()));
         tracker.images = now;
     }
 
@@ -878,8 +906,28 @@ impl Renderer {
         }
     }
 
-    /// Replay a pile scene into `pixmap` on the CPU (render-test, Wayland).
+    /// Replay a pile scene into `pixmap` on the CPU (X11 piles window,
+    /// render-test, Wayland).
     pub fn rasterize_piles(&self, scene: &PileScene, pixmap: &mut Pixmap) {
+        let (pw, ph) = (pixmap.width(), pixmap.height());
+        let mut slot = self.mask.borrow_mut();
+        if slot.as_ref().map(|m| (m.width(), m.height())) != Some((pw, ph)) {
+            *slot = tiny_skia::Mask::new(pw, ph);
+        }
+        let rects: Vec<Rect> = scene
+            .clear
+            .iter()
+            .filter_map(|r| clip_to(*r, pw, ph))
+            .collect();
+        let Some(mask) = slot.as_mut() else {
+            return;
+        };
+        fill_mask(mask, &rects, 255);
+        self.rasterize_piles_with(scene, pixmap, mask);
+        fill_mask(mask, &rects, 0);
+    }
+
+    fn rasterize_piles_with(&self, scene: &PileScene, pixmap: &mut Pixmap, mask: &tiny_skia::Mask) {
         let mut target = Target {
             w: pixmap.width() as i32,
             h: pixmap.height() as i32,
@@ -891,7 +939,7 @@ impl Renderer {
         let (pw, ph) = (pixmap.width(), pixmap.height());
         // One mask for the damage; a separate one only for a draw whose
         // holes (windows above it) cut into the damage.
-        let base = clip_mask(&scene.clear, pw, ph);
+        let base = Some(mask);
         // Some(own mask) when holes cut into the damage; Some(None) when
         // they cover all of it (draw nothing); None: use `base`.
         let clip_for = |holes: &[Rect]| {
@@ -903,7 +951,7 @@ impl Renderer {
         for draw in &scene.piles {
             let own = clip_for(&draw.holes);
             let clip = match &own {
-                None => base.as_ref(),
+                None => base,
                 Some(None) => continue,
                 Some(Some(m)) => Some(m),
             };
@@ -925,7 +973,7 @@ impl Renderer {
         for ice in &scene.icicles {
             let own = clip_for(&ice.holes);
             let clip = match &own {
-                None => base.as_ref(),
+                None => base,
                 Some(None) => continue,
                 Some(Some(m)) => Some(m),
             };
@@ -966,8 +1014,13 @@ impl Renderer {
         if scene.images.is_empty() {
             return;
         }
-        let clip = base.as_ref();
         for d in &scene.images {
+            let own = clip_for(&d.holes);
+            let clip = match &own {
+                None => base,
+                Some(None) => continue,
+                Some(Some(m)) => Some(m),
+            };
             self.images.with(d.image, |img| {
                 pixmap.draw_pixmap(
                     d.x,
@@ -994,6 +1047,18 @@ fn pile_path(draw: &PileDraw, dy: f32) -> Option<tiny_skia::Path> {
     pb.line_to(last.0, draw.base_y + dy);
     pb.close();
     pb.finish()
+}
+
+/// Set the mask bytes of `rects` (inside the mask) to `value`.
+fn fill_mask(mask: &mut tiny_skia::Mask, rects: &[Rect], value: u8) {
+    let w = mask.width() as usize;
+    let data = mask.data_mut();
+    for r in rects {
+        for y in r.y as usize..r.bottom() as usize {
+            let row = y * w;
+            data[row + r.x as usize..row + r.right() as usize].fill(value);
+        }
+    }
 }
 
 fn clip_mask(rects: &[Rect], w: u32, h: u32) -> Option<tiny_skia::Mask> {

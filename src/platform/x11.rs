@@ -1749,21 +1749,43 @@ fn to_x_rect(r: &Rect) -> Rectangle {
     }
 }
 
-/// Damage rects clipped to `bounds`, with heavy overlap merged: many
-/// rects become their bounding box when that isn't much bigger.
+/// Damage rects clipped to `bounds`, with overlap merged. Two or a few
+/// rects become their bounding box when that isn't much bigger. Many small
+/// ones (flying snow all over the screen) are merged per 128 px cell, so
+/// the upload stays close to the real damage instead of one huge box.
 fn coalesce(rects: &[Rect], bounds: &Rect) -> Vec<Rect> {
+    const CELL: i32 = 128;
     let clipped: Vec<Rect> = rects.iter().filter_map(|r| r.intersect(bounds)).collect();
     let Some(first) = clipped.first() else {
         return clipped;
     };
-    let bbox = clipped.iter().fold(*first, |a, r| a.union(r));
     let area = |r: &Rect| u64::from(r.w) * u64::from(r.h);
+    let bbox = clipped.iter().fold(*first, |a, r| a.union(r));
     let sum: u64 = clipped.iter().map(area).sum();
-    if clipped.len() > 64 || area(&bbox) <= sum + sum / 2 {
-        vec![bbox]
-    } else {
-        clipped
+    if area(&bbox) <= sum + sum / 2 {
+        return vec![bbox];
     }
+    if clipped.len() <= 64 {
+        return clipped;
+    }
+    let mut cells: std::collections::HashMap<(i32, i32), Vec<Rect>> =
+        std::collections::HashMap::new();
+    for r in &clipped {
+        let key = (r.x.div_euclid(CELL), r.y.div_euclid(CELL));
+        cells.entry(key).or_default().push(*r);
+    }
+    let mut out = Vec::new();
+    for rs in cells.into_values() {
+        let bbox = rs.iter().fold(rs[0], |a, r| a.union(r));
+        let sum: u64 = rs.iter().map(area).sum();
+        if area(&bbox) <= sum * 2 {
+            out.push(bbox);
+        } else {
+            out.extend(rs);
+        }
+    }
+    out.sort_by_key(|r| (r.y, r.x));
+    out
 }
 
 /// Encode draws as GLYPHELT32 items: one glyph each, positioned relative to
@@ -1903,5 +1925,23 @@ mod tests {
             vec![Rect::new(0, 0, 10, 10), Rect::new(95, 95, 5, 5)]
         );
         assert!(coalesce(&[Rect::new(200, 200, 5, 5)], &b).is_empty());
+        // Many small rects spread over a big screen: merged per cell, not
+        // into one screen-sized box.
+        let big = Rect::new(0, 0, 1920, 1080);
+        let tiles: Vec<Rect> = (0..200)
+            .map(|i| Rect::new((i * 97) % 1900, (i * 53) % 1060, 16, 16))
+            .collect();
+        let out = coalesce(&tiles, &big);
+        let covered: u64 = out.iter().map(|r| u64::from(r.w) * u64::from(r.h)).sum();
+        assert!(
+            covered <= 200 * 16 * 16 * 2,
+            "upload stays small: {covered}"
+        );
+        for t in &tiles {
+            assert!(
+                out.iter().any(|r| r.intersect(t) == Some(*t)),
+                "{t:?} covered"
+            );
+        }
     }
 }

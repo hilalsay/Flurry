@@ -21,6 +21,8 @@ use crate::power::PauseReason;
 pub enum Command {
     Toggle,
     Clear,
+    /// Start a tornado / snow storm.
+    Tornado,
     Intensity(Intensity),
     Fps(u32),
     Play,
@@ -43,6 +45,7 @@ impl Command {
         match self {
             Command::Toggle => "toggle".into(),
             Command::Clear => "clear".into(),
+            Command::Tornado => "tornado".into(),
             Command::Intensity(i) => format!("intensity {}", intensity_name(*i)),
             Command::Fps(n) => format!("fps {n}"),
             Command::Play => "play".into(),
@@ -63,6 +66,7 @@ impl Command {
         let cmd = match (words.next(), words.next()) {
             (Some("toggle"), None) => Command::Toggle,
             (Some("clear"), None) => Command::Clear,
+            (Some("tornado"), None) => Command::Tornado,
             (Some("intensity"), Some(level)) => Command::Intensity(match level {
                 "light" => Intensity::Light,
                 "medium" => Intensity::Medium,

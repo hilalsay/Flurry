@@ -230,6 +230,27 @@ impl Flakes {
         }
     }
 
+    /// Pull flakes near the tornado's funnel into it: they circle its axis
+    /// and are carried up; at the top they are let go.
+    pub fn vortex(&mut self, dt: f32, t: f64, f: &crate::sim::tornado::Funnel) {
+        for fl in &mut self.flakes {
+            let h = f.rel_height(fl.y);
+            if !(-0.05..1.0).contains(&h) {
+                continue;
+            }
+            let (rr, cx) = (f.radius(h), f.centre(h));
+            let reach = rr * 1.8 + 30.0;
+            let d = (fl.x - cx).abs();
+            if d > reach {
+                continue;
+            }
+            let s = (1.0 - d / reach) * f.strength;
+            let target = cx + rr * phase_sin(t, 4.0, fl.sway_phase);
+            fl.x += (target - fl.x) * (3.0 * s * dt).min(1.0);
+            fl.y -= (fl.fall + 140.0) * 1.6 * s * dt;
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn as_mut_slice(&mut self) -> &mut [Flake] {
         &mut self.flakes

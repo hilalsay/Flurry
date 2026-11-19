@@ -482,6 +482,18 @@ impl<'b> MainLoop<'b> {
             Command::Play => {
                 "play mode isn't needed on X11: flurry already sees the real mouse".into()
             }
+            Command::Tornado => {
+                if self.showing {
+                    self.world.start_storm();
+                    log::info!("a tornado is coming");
+                    format!(
+                        "tornado! a snow storm for {:.0} s",
+                        crate::sim::tornado::DURATION
+                    )
+                } else {
+                    "paused: resume first (flurry toggle)".into()
+                }
+            }
             Command::Reload => self.reload()?,
             Command::Status => self.status(),
             Command::Quit => return Ok(("quitting".into(), Flow::Quit)),
@@ -518,7 +530,7 @@ impl<'b> MainLoop<'b> {
     fn status(&self) -> String {
         format!(
             "{} intensity={} fps={} flakes={} monitors={} panels={} windows={} snow={:.0} \
-             on_windows={:.0} flying={} snowballs={} snowmen={}{}{}",
+             on_windows={:.0} flying={} snowballs={} snowmen={}{}{}{}",
             match (self.paused, self.auto_reasons()) {
                 (true, _) => "paused".to_owned(),
                 (false, None) => "running".to_owned(),
@@ -543,6 +555,10 @@ impl<'b> MainLoop<'b> {
             self.world.snowfolk().balls().len(),
             self.world.snowfolk().snowmen().len(),
             if self.on_battery { " battery" } else { "" },
+            self.world
+                .storm_remaining()
+                .map(|s| format!(" storm={s:.0}s"))
+                .unwrap_or_default(),
             self.weather
                 .map(|w| format!(" weather_wind={:.2}", w.wind))
                 .unwrap_or_default()

@@ -8,6 +8,7 @@ pub mod icicles;
 pub mod particles;
 pub mod piles;
 pub mod snowballs;
+pub mod tornado;
 
 use crate::config::{CarryModifier, Config};
 use crate::geom::{AppWindow, Inputs, OutputInfo, Rect, WindowRect};
@@ -97,6 +98,8 @@ pub struct World {
     pen: Option<(f32, f32)>,
     /// The layout the piles were last synced to.
     layout: Layout,
+    /// A tornado / snow storm in progress.
+    storm: Option<tornado::Storm>,
 }
 
 /// Everything about the screen layout that affects piles.
@@ -137,6 +140,7 @@ impl World {
             globe: globe::Globe::default(),
             pen: None,
             layout: Layout::default(),
+            storm: None,
         }
     }
 
@@ -151,6 +155,25 @@ impl World {
             self.icicles.all()
         } else {
             Vec::new()
+        }
+    }
+
+    /// Start a tornado / snow storm (restarts one in progress).
+    pub fn start_storm(&mut self) {
+        let seed = self.time.to_bits() ^ 0x70A2_ADE5;
+        self.storm = Some(tornado::Storm::new(seed));
+    }
+
+    /// Seconds left of the storm, if one is going on.
+    pub fn storm_remaining(&self) -> Option<f32> {
+        self.storm.as_ref().map(tornado::Storm::remaining)
+    }
+
+    /// The tornado's swirling snow, drawn like flakes.
+    pub fn swirl(&self) -> Vec<tornado::SwirlBit> {
+        match (&self.storm, &self.bounds) {
+            (Some(s), Some(b)) => s.bits(b),
+            _ => Vec::new(),
         }
     }
 
@@ -171,7 +194,22 @@ impl World {
         if !self.params.interaction {
             return Vec::new();
         }
-        self.snowfolk.grab_rects(cursor, self.params.carry_modifier)
+        // A ball behind a window must not catch that window's clicks.
+        let rects = self.snowfolk.grab_rects(cursor, self.params.carry_modifier);
+        let occluders: Vec<(i32, Rect)> = self.occluders().collect();
+        rects
+            .iter()
+            .enumerate()
+            .flat_map(|(i, r)| {
+                let z = self.snowfolk.ball_depth(i, &self.piles);
+                let holes: Vec<Rect> = occluders
+                    .iter()
+                    .filter(|(oz, _)| *oz > z)
+                    .map(|(_, o)| *o)
+                    .collect();
+                crate::geom::subtract(&[*r], &holes)
+            })
+            .collect()
     }
 
     /// Snow in flight (knocked or spilled off windows).
@@ -246,15 +284,19 @@ impl World {
         self.sync_piles(inputs);
         self.time += f64::from(dt);
         self.wind.update(self.time);
+        let storm_wind = self.step_storm(dt, &bounds);
         let (piles, max_h) = (&mut self.piles, self.params.max_pile_height);
         self.flakes.step_landing(
             dt,
             self.time,
-            self.wind.current(),
+            self.wind.current() + storm_wind,
             self.params.fall_speed,
             &bounds,
             |f, y_before| f.layer.collides() && piles.try_land(f.x, y_before, f.y, f.r, max_h),
         );
+        if let Some(f) = self.storm.as_ref().and_then(|s| s.funnel(&bounds)) {
+            self.flakes.vortex(dt, self.time, &f);
+        }
         let monitors: Vec<Rect> = inputs.outputs.iter().map(|o| o.rect).collect();
         let confine = (!self.params.cross_monitor).then_some(monitors.as_slice());
         self.particles.step(dt, &bounds, confine, |p, y_before| {
@@ -274,7 +316,9 @@ impl World {
         };
         self.piles
             .step(dt, self.params.melt_rate, max_h, &mut self.particles, heat);
+        let occluders: Vec<(i32, Rect)> = self.occluders().collect();
         let mut env = Env {
+            occluders: &occluders,
             dt,
             now: self.time,
             cursor: inputs.cursor.filter(|_| self.params.interaction),
@@ -345,6 +389,75 @@ impl World {
             );
             self.layout = layout;
         }
+    }
+
+    /// Advance the storm: more flakes while it lasts, snow sucked up from
+    /// piles under the funnel and flung out, snowballs thrown. Returns the
+    /// extra wind.
+    fn step_storm(&mut self, dt: f32, bounds: &Rect) -> f32 {
+        let target = self.target_count();
+        let Some(storm) = self.storm.as_mut() else {
+            return 0.0;
+        };
+        storm.step(dt);
+        if storm.is_over() {
+            self.storm = None;
+            self.flakes.set_count(target, bounds);
+            log::info!("the storm is over");
+            return 0.0;
+        }
+        let (strength, wind) = (storm.strength(), storm.wind());
+        let extra = 1.0 + tornado::EXTRA_FLAKES * strength;
+        let count = ((target as f32 * extra) as usize).min(MAX_FLAKES);
+        self.flakes.set_count(count, bounds);
+        let Some((f, amount)) = storm.suction(dt, bounds) else {
+            return wind;
+        };
+        // Suck up snow from piles near the funnel's foot.
+        let keys: Vec<(piles::SurfaceKey, f32)> = self
+            .piles
+            .surfaces()
+            .iter()
+            .filter_map(|s| {
+                let h = f.rel_height(s.y);
+                let cx = f.centre(h);
+                ((0.0..0.35).contains(&h) && s.top_at(cx).is_some())
+                    .then(|| (s.key.clone(), f.radius(h).max(20.0)))
+            })
+            .collect();
+        for (key, half) in keys {
+            let (cx, y) = match self.piles.surface(&key) {
+                Some(s) => (f.centre(f.rel_height(s.y)), s.y),
+                None => continue,
+            };
+            // `take` removes a depth (px) from each column it covers.
+            let taken = self.piles.take(&key, cx, half, amount / (2.0 * half));
+            if taken <= 0.0 {
+                continue;
+            }
+            let n = (taken / particles::PARTICLE_VOLUME).ceil().max(1.0);
+            for _ in 0..n as usize {
+                let (vx, vy) = storm.fling();
+                self.particles.spawn(
+                    particles::Particle {
+                        x: cx + (vx.signum() * half * 0.3),
+                        y: y - 4.0,
+                        vx,
+                        vy,
+                        volume: taken / n,
+                    },
+                    40.0,
+                );
+            }
+        }
+        // Throw snowballs and snowmen near the foot.
+        let reach = |x: f32, y: f32| {
+            let h = f.rel_height(y);
+            (0.0..0.4).contains(&h) && (x - f.centre(h)).abs() < f.radius(h) + 20.0
+        };
+        self.snowfolk
+            .blow(|x, y| reach(x, y).then(|| storm.fling()));
+        wind
     }
 
     fn target_count(&self) -> usize {
@@ -573,5 +686,44 @@ mod tests {
             .unwrap_or(Duration::MAX);
         eprintln!("sim step, 300 flakes: {best:?}");
         assert!(best < Duration::from_micros(200), "step took {best:?}");
+    }
+
+    #[test]
+    fn a_tornado_storm_blows_and_ends() {
+        let mut w = World::new(SimParams::default(), 5);
+        let inputs = Inputs {
+            obstacles: vec![WindowRect {
+                id: 1,
+                rect: Rect::new(0, 1040, 1920, 40),
+            }],
+            ..inputs_1080p()
+        };
+        for _ in 0..60 * 120 {
+            w.step(1.0 / 60.0, &inputs);
+        }
+        let normal = w.flakes().len();
+        assert!(w.swirl().is_empty() && w.storm_remaining().is_none());
+        w.start_storm();
+        let (mut most_flakes, mut most_flying, mut most_bits) = (0, 0, 0);
+        let start = Instant::now();
+        let steps = (tornado::DURATION * 60.0) as u32 + 30;
+        for _ in 0..steps {
+            w.step(1.0 / 60.0, &inputs);
+            most_flakes = most_flakes.max(w.flakes().len());
+            most_flying = most_flying.max(w.particles().len());
+            most_bits = most_bits.max(w.swirl().len());
+        }
+        let per_step = start.elapsed() / steps;
+        assert!(
+            most_flakes as f32 >= normal as f32 * 1.75,
+            "heavier snowfall: {most_flakes} vs {normal}"
+        );
+        assert!(most_bits > 400, "a visible funnel: {most_bits}");
+        assert!(most_flying > 20, "pile snow sucked up: {most_flying}");
+        assert!(w.storm_remaining().is_none(), "over");
+        assert_eq!(w.flakes().len(), normal, "back to normal");
+        assert!(w.swirl().is_empty());
+        // Cheap enough for the CPU budget (debug build: generous).
+        assert!(per_step < Duration::from_millis(4), "{per_step:?} per step");
     }
 }
