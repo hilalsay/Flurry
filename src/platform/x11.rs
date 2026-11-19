@@ -419,6 +419,10 @@ impl X11Backend {
                                 | EventMask::BUTTON_RELEASE,
                         ),
                     )?;
+                    // A hand over the clickable part of a snowball.
+                    if let Err(e) = self.set_hand_cursor(w.window) {
+                        log::debug!("no hand cursor: {e:#}");
+                    }
                     Some(w)
                 }
             };
@@ -629,6 +633,33 @@ impl X11Backend {
             window,
             &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
         )?;
+        Ok(())
+    }
+
+    /// Show the standard "hand2" cursor over `window`'s input region.
+    fn set_hand_cursor(&self, window: Window) -> Result<()> {
+        const XC_HAND2: u16 = 60;
+        let font = self.conn.generate_id()?;
+        self.conn.open_font(font, b"cursor")?;
+        let cursor = self.conn.generate_id()?;
+        self.conn.create_glyph_cursor(
+            cursor,
+            font,
+            font,
+            XC_HAND2,
+            XC_HAND2 + 1,
+            0,
+            0,
+            0,
+            0xffff,
+            0xffff,
+            0xffff,
+        )?;
+        self.conn
+            .change_window_attributes(window, &ChangeWindowAttributesAux::new().cursor(cursor))?;
+        // The window keeps its own reference.
+        self.conn.free_cursor(cursor)?;
+        self.conn.close_font(font)?;
         Ok(())
     }
 

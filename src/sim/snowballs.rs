@@ -5,9 +5,13 @@
 //! - Snowballs roll with friction, ride on moving windows, fall off edges,
 //!   push each other, and can rest on top of each other.
 //! - A ball that falls a long way **poofs** into the pile it lands on.
-//! - With the carry modifier held, left-drag picks a ball up; release drops
-//!   (or throws) it.
-//! - Three balls stacked large → medium → small become a snowman.
+//! - Hovering over the upper half of a ball makes it clickable (no
+//!   modifier needed): left-drag picks it up, release drops (or throws) it.
+//!   Pushing only happens lower down, at snow level, so reaching for a ball
+//!   doesn't roll it away. With the carry modifier held, the whole ball is
+//!   clickable.
+//! - Any three balls stacked on each other become a snowman; their snow
+//!   rearranges so the biggest ball is at the bottom.
 
 use std::f32::consts::PI;
 
@@ -40,6 +44,8 @@ const SNOWMAN_RATIO: f32 = 1.1;
 /// A ball resting on another stays on if its centre is within this share
 /// of the lower ball's radius; further out it slides off.
 const BALANCE: f32 = 0.45;
+/// Extra px around a ball that still counts as on it.
+const GRAB_MARGIN: f32 = 3.0;
 /// Cursor samples older than this count as "not moving".
 const CURSOR_STALE: f64 = 0.12;
 
@@ -91,6 +97,19 @@ impl Snowball {
     fn resting(&self) -> bool {
         matches!(self.state, State::OnSurface { .. } | State::OnBall { .. })
     }
+}
+
+/// The snow of three stacked balls, rearranged bottom to top so each ball
+/// is clearly bigger than the one above it (`SNOWMAN_RATIO` in radius).
+/// Total snow stays the same.
+fn snowman_volumes(mut v: [f32; 3]) -> [f32; 3] {
+    v.sort_by(|a, b| b.total_cmp(a));
+    let total: f32 = v.iter().sum();
+    // Radius ratio k means volume ratio k².
+    let k2 = SNOWMAN_RATIO * SNOWMAN_RATIO * 1.05;
+    let top = v[2].min(total / (1.0 + k2 + k2 * k2));
+    let mid = v[1].max(top * k2).min((total - top) / (1.0 + k2));
+    [total - mid - top, mid, top]
 }
 
 pub fn radius_of(volume: f32) -> f32 {
@@ -175,22 +194,21 @@ impl Snowfolk {
         self.balls.iter().any(Snowball::is_carried)
     }
 
-    /// Where clicks should be caught instead of passed through: the balls,
-    /// while the carry modifier is held or a ball is being carried.
+    /// Where clicks should be caught instead of passed through: the upper
+    /// half of every ball (to pick it up), and whole balls while the carry
+    /// modifier is held or a ball is being carried.
     pub fn grab_rects(&self, cursor: Option<&CursorState>, carry: CarryModifier) -> Vec<Rect> {
-        let active = self.is_carrying() || cursor.is_some_and(|c| modifier_held(carry, c));
-        if !active {
-            return Vec::new();
-        }
+        let whole = self.is_carrying() || cursor.is_some_and(|c| modifier_held(carry, c));
         self.balls
             .iter()
             .map(|b| {
-                let r = b.radius() + 3.0;
+                let r = b.radius() + GRAB_MARGIN;
+                let h = if whole { 2.0 * r } else { r };
                 Rect::new(
                     (b.x - r).floor() as i32,
                     (b.y - r).floor() as i32,
                     (2.0 * r).ceil() as u32,
-                    (2.0 * r).ceil() as u32,
+                    h.ceil() as u32,
                 )
             })
             .collect()
@@ -306,13 +324,18 @@ impl Snowfolk {
                 }
             }
         }
-        // Pick up the ball under the cursor.
-        if pressed && modifier_held(env.carry, c) {
+        // Pick up the ball under the cursor: by its upper half, or anywhere
+        // with the carry modifier.
+        if pressed {
+            let any_part = modifier_held(env.carry, c);
             let hit = self
                 .balls
                 .iter()
                 .enumerate()
-                .filter(|(_, b)| (b.x - c.x).hypot(b.y - c.y) <= b.radius() + 3.0)
+                .filter(|(_, b)| {
+                    (b.x - c.x).hypot(b.y - c.y) <= b.radius() + GRAB_MARGIN
+                        && (any_part || c.y <= b.y)
+                })
                 .min_by(|(_, a), (_, b)| a.radius().total_cmp(&b.radius()))
                 .map(|(i, _)| i);
             if let Some(i) = hit {
@@ -340,8 +363,9 @@ impl Snowfolk {
         let dir = vx.signum();
         if let Some(b) = self.balls.iter_mut().find(|b| {
             let r = b.radius();
-            // From just above the ball down into the snow it sits on.
-            (b.x - c.x).abs() <= r + 3.0 && c.y >= b.y - r - 3.0 && c.y <= b.y + r + 12.0
+            // From its middle down into the snow it sits on; the upper half
+            // is for picking it up.
+            (b.x - c.x).abs() <= r + GRAB_MARGIN && c.y > b.y && c.y <= b.y + r + 12.0
         }) {
             let r = b.radius();
             let ahead = c.x + dir * r * 0.9;
@@ -612,9 +636,7 @@ impl Snowfolk {
                 continue;
             };
             let (b, m, t) = (bottom, &self.balls[mi], &self.balls[ti]);
-            let sizes_ok =
-                b.radius() > m.radius() * SNOWMAN_RATIO && m.radius() > t.radius() * SNOWMAN_RATIO;
-            if sizes_ok && settled(b) && settled(m) && settled(t) {
+            if settled(b) && settled(m) && settled(t) {
                 found = Some((bi, mi, ti, key.clone(), *offset));
                 break;
             }
@@ -623,13 +645,14 @@ impl Snowfolk {
             return;
         };
         let (b, m, t) = (&self.balls[bi], &self.balls[mi], &self.balls[ti]);
+        let volumes = snowman_volumes([b.volume, m.volume, t.volume]);
         let man = Snowman {
             x: b.x,
             base: b.y + b.radius(),
-            radii: [b.radius(), m.radius(), t.radius()],
+            radii: volumes.map(radius_of),
             key,
             offset,
-            volumes: [b.volume, m.volume, t.volume],
+            volumes,
         };
         let ids = [b.id, m.id, t.id];
         self.balls.retain(|x| !ids.contains(&x.id));
@@ -787,10 +810,13 @@ mod tests {
     }
 
     #[test]
-    fn carry_needs_the_modifier() {
+    fn click_the_top_of_a_ball_to_carry_it() {
         let mut rig = Rig::new(8.0);
         rig.ball_at(500.0, 400.0);
-        let (x, y) = (rig.folk.balls()[0].x, rig.folk.balls()[0].y);
+        let (x, y, r) = {
+            let b = &rig.folk.balls()[0];
+            (b.x, b.y, b.radius())
+        };
         let at = |x, y, left_down, alt| CursorState {
             x,
             y,
@@ -798,26 +824,58 @@ mod tests {
             alt,
             super_: false,
         };
-        // Plain left drag: not picked up.
-        rig.step(Some(at(x, y, false, false)), CarryModifier::Alt);
-        rig.step(Some(at(x, y, true, false)), CarryModifier::Alt);
+        // Only the upper half is clickable without a modifier.
+        let grab = rig.folk.grab_rects(None, CarryModifier::Alt);
+        assert_eq!(grab.len(), 1);
+        assert!(grab[0].contains(x as i32, (y - r * 0.5) as i32));
+        assert!(!grab[0].contains(x as i32, (y + r * 0.5) as i32));
+        // Hovering in from above doesn't push it away.
+        for k in 0..20 {
+            let cx = x - 40.0 + 2.0 * k as f32;
+            rig.step(Some(at(cx, y - r * 0.5, false, false)), CarryModifier::Alt);
+        }
+        assert!((rig.folk.balls()[0].x - x).abs() < 0.5, "not pushed");
+        // Plain click on its lower half (moving straight down, so no push):
+        // not picked up.
+        let gx = x - 2.0;
+        rig.step(Some(at(gx, y + r * 0.5, true, false)), CarryModifier::Alt);
         assert!(!rig.folk.is_carrying());
-        rig.step(Some(at(x, y, false, false)), CarryModifier::Alt);
-        // Alt + left: carried along with the cursor.
-        rig.step(Some(at(x, y, true, true)), CarryModifier::Alt);
+        rig.step(Some(at(gx, y + r * 0.5, false, false)), CarryModifier::Alt);
+        // Plain click on its upper half: carried along with the cursor.
+        let gy = y - r * 0.5;
+        rig.step(Some(at(gx, gy, true, false)), CarryModifier::Alt);
         assert!(rig.folk.is_carrying());
         assert!(!rig.folk.grab_rects(None, CarryModifier::Alt).is_empty());
         for k in 1..=30 {
             rig.step(
-                Some(at(x, y - 10.0 * k as f32, true, true)),
+                Some(at(gx, gy - 10.0 * k as f32, true, false)),
                 CarryModifier::Alt,
             );
         }
         assert!((rig.folk.balls()[0].y - (y - 300.0)).abs() < 1.0);
         // Release: it drops back onto the panel (300 px fall: poof!).
-        rig.step(Some(at(x, y - 300.0, false, false)), CarryModifier::Alt);
+        rig.step(Some(at(gx, gy - 300.0, false, false)), CarryModifier::Alt);
         rig.run(2.0);
         assert!(rig.folk.balls().is_empty(), "poofed into the pile");
+    }
+
+    #[test]
+    fn modifier_makes_the_whole_ball_clickable() {
+        let mut rig = Rig::new(8.0);
+        rig.ball_at(500.0, 400.0);
+        let (x, y, r) = {
+            let b = &rig.folk.balls()[0];
+            (b.x, b.y, b.radius())
+        };
+        let alt = CursorState {
+            x,
+            y: y + r * 0.5,
+            left_down: true,
+            alt: true,
+            super_: false,
+        };
+        rig.step(Some(alt), CarryModifier::Alt);
+        assert!(rig.folk.is_carrying());
     }
 
     #[test]
@@ -874,28 +932,59 @@ mod tests {
     }
 
     #[test]
-    fn wrong_order_is_no_snowman() {
+    fn any_three_stacked_balls_make_a_snowman() {
         let mut rig = Rig::new(8.0);
         rig.ball_at(800.0, 300.0); // small at the bottom
-        let top = rig.folk.balls()[0].y - rig.folk.balls()[0].radius();
         for vol in [900.0, 2000.0] {
+            let top = rig
+                .folk
+                .balls()
+                .iter()
+                .map(|b| b.y - b.radius())
+                .fold(f32::MAX, f32::min);
             let id = rig.folk.new_id();
             let r = radius_of(vol);
             rig.folk.balls.push(Snowball {
                 id,
                 x: 800.0,
-                y: top - r - 200.0,
+                y: top - r - 30.0,
                 vx: 0.0,
                 vy: 0.0,
                 volume: vol,
                 state: State::Free {
-                    fall_from: top - r - 100.0,
+                    fall_from: top - r - 30.0,
                 },
                 settled: 0.0,
             });
             rig.run(1.0);
         }
-        assert!(rig.folk.snowmen().is_empty());
+        assert_eq!(rig.folk.snowmen().len(), 1);
+        let m = &rig.folk.snowmen()[0];
+        assert!(
+            m.radii[0] > m.radii[1] && m.radii[1] > m.radii[2],
+            "biggest at the bottom: {:?}",
+            m.radii
+        );
+        let total: f32 = m.volumes.iter().sum();
+        assert!((total - 3200.0).abs() < 1.0, "snow is kept");
+    }
+
+    #[test]
+    fn snowman_volumes_are_ordered_and_conserved() {
+        for v in [
+            [300.0, 900.0, 2000.0],
+            [500.0, 500.0, 500.0],
+            [2000.0, 1999.0, 10.0],
+            [40.0, 40.0, 3000.0],
+        ] {
+            let out = snowman_volumes(v);
+            let r = out.map(radius_of);
+            assert!(
+                r[0] > r[1] * SNOWMAN_RATIO - 1e-3 && r[1] > r[2] * SNOWMAN_RATIO - 1e-3,
+                "{v:?} -> {out:?}"
+            );
+            assert!((out.iter().sum::<f32>() - v.iter().sum::<f32>()).abs() < 1e-2);
+        }
     }
 
     #[test]

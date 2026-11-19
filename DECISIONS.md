@@ -290,3 +290,18 @@ decided and why.
   with balls missing.
 - **No icicles on the panel** (user request: the taskbar icicles aren't needed). Icicles now only
   grow from the bottom edges of snowy windows. Test: `no_icicles_on_the_panel`.
+- **Snowballs are clickable without a modifier, from their upper half** (user request: "make
+  iceballs clickable when hovering starts from their top", and any 3 stacked balls should make a
+  snowman with a face and scarf). The upper half of every ball is always in the piles window's
+  input region, and the window shows the `hand2` cursor there. A plain left drag carries the ball.
+  Pushing and rolling now only happen from the ball's middle down to the snow, so reaching for a
+  ball from above doesn't roll it away. With the carry modifier (Alt) held, the whole ball is
+  clickable as before. Alt + drag still writes in the snow. Trade-off: a click on the top half of
+  a ball no longer reaches the panel/window under it. That's OK because the ball covers that spot
+  anyway.
+- **Any three stacked balls make a snowman.** The size-order rule (big → medium → small) is gone.
+  The three volumes are redistributed (total kept) so each ball's radius is at least 1.1× the one
+  above (`snowman_volumes`). The existing snowman art already has coal eyes, a carrot nose, a red
+  scarf, buttons and stick arms. Checked live with synthetic XTest input: rolled three balls of
+  similar size (r ≈ 10), carried two of them with plain clicks (the script checked that the pointer
+  was over flurry's window before each press), and a snowman was built.

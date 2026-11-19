@@ -55,9 +55,11 @@ The tray menu has the same controls.
 
 - **Roll a snowball**: move the mouse sideways through a snow pile (on the panel or a window top).
   Keep pushing and it grows.
-- **Carry it**: hold **Alt** and drag the snowball. Let go to drop or throw it. A long fall makes it
-  *poof*.
-- **Snowman**: stack three balls, big → medium → small.
+- **Carry it**: point at the top half of a snowball (the cursor turns into a hand), then click and
+  drag it. Let go to drop or throw it. A long fall makes it *poof*. With **Alt** held you can
+  grab it anywhere.
+- **Snowman**: stack any three balls on top of each other. They become a snowman with a face, a
+  scarf and stick arms (the snow rearranges so the biggest ball ends up at the bottom).
 - **Write in the snow**: hold **Alt** and drag through a deep pile.
 - **Snow globe**: shake the mouse fast from side to side.
 - **Frost**: leave the mouse alone for a few minutes. Move it to wipe the frost away.
@@ -81,7 +83,7 @@ melt_rate = 1.0
 fps = 30
 pile_on_windows = true
 interaction = true        # snowballs etc.
-carry_modifier = "alt"    # none | alt | super
+carry_modifier = "alt"    # none | alt | super: grab a whole ball / write in the snow
 auto_pause_fullscreen = true
 monitors = "all"          # or ["DP-1", "eDP-1"]
 layering = "auto"         # auto | two-window | mask | desktop | front
