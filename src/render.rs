@@ -889,8 +889,24 @@ impl Renderer {
             target.clear(r);
         }
         let (pw, ph) = (pixmap.width(), pixmap.height());
+        // One mask for the damage; a separate one only for a draw whose
+        // holes (windows above it) cut into the damage.
+        let base = clip_mask(&scene.clear, pw, ph);
+        // Some(own mask) when holes cut into the damage; Some(None) when
+        // they cover all of it (draw nothing); None: use `base`.
+        let clip_for = |holes: &[Rect]| {
+            let cuts = holes
+                .iter()
+                .any(|h| scene.clear.iter().any(|c| c.intersect(h).is_some()));
+            cuts.then(|| clip_mask(&subtract(&scene.clear, holes), pw, ph))
+        };
         for draw in &scene.piles {
-            let clip = clip_mask(&subtract(&scene.clear, &draw.holes), pw, ph);
+            let own = clip_for(&draw.holes);
+            let clip = match &own {
+                None => base.as_ref(),
+                Some(None) => continue,
+                Some(Some(m)) => Some(m),
+            };
             for (rgba, dy) in [(PILE_SHADOW, PILE_SHADOW_OFFSET), (PILE_FILL, 0.0)] {
                 let Some(path) = pile_path(draw, dy) else {
                     continue;
@@ -902,12 +918,17 @@ impl Renderer {
                     &paint,
                     FillRule::Winding,
                     Transform::identity(),
-                    clip.as_ref(),
+                    clip,
                 );
             }
         }
         for ice in &scene.icicles {
-            let clip = clip_mask(&subtract(&scene.clear, &ice.holes), pw, ph);
+            let own = clip_for(&ice.holes);
+            let clip = match &own {
+                None => base.as_ref(),
+                Some(None) => continue,
+                Some(Some(m)) => Some(m),
+            };
             for (tri, rgba) in ice.triangles() {
                 let mut pb = PathBuilder::new();
                 pb.move_to(tri[0].0, tri[0].1);
@@ -922,7 +943,7 @@ impl Renderer {
                     &paint,
                     FillRule::Winding,
                     Transform::identity(),
-                    clip.as_ref(),
+                    clip,
                 );
             }
         }
@@ -945,7 +966,7 @@ impl Renderer {
         if scene.images.is_empty() {
             return;
         }
-        let clip = clip_mask(&scene.clear, pw, ph);
+        let clip = base.as_ref();
         for d in &scene.images {
             self.images.with(d.image, |img| {
                 pixmap.draw_pixmap(
@@ -954,7 +975,7 @@ impl Renderer {
                     img.as_ref(),
                     &tiny_skia::PixmapPaint::default(),
                     Transform::identity(),
-                    clip.as_ref(),
+                    clip,
                 );
             });
         }

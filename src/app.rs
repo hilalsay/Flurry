@@ -45,6 +45,8 @@ struct Surface {
     scene: Scene,
     piles: PileTracker,
     pile_scene: PileScene,
+    /// CPU copy of the piles window (created on first draw).
+    pile_pixels: Option<tiny_skia::Pixmap>,
 }
 
 impl Surface {
@@ -53,6 +55,23 @@ impl Surface {
         self.damage.invalidate();
         self.piles.invalidate();
     }
+}
+
+/// Draw the changed parts of `s`'s piles into its CPU pixmap.
+fn rasterize<'a>(
+    renderer: &Renderer,
+    rect: Rect,
+    scene: &PileScene,
+    pixels: &'a mut Option<tiny_skia::Pixmap>,
+) -> Option<&'a tiny_skia::Pixmap> {
+    if pixels.as_ref().map(|p| (p.width(), p.height())) != Some((rect.w, rect.h)) {
+        *pixels = tiny_skia::Pixmap::new(rect.w, rect.h);
+    }
+    let p = pixels.as_mut()?;
+    if !scene.clear.is_empty() {
+        renderer.rasterize_piles(scene, p);
+    }
+    Some(p)
 }
 
 fn surfaces_for(outputs: &[OutputInfo]) -> Vec<Surface> {
@@ -64,6 +83,7 @@ fn surfaces_for(outputs: &[OutputInfo]) -> Vec<Surface> {
             scene: Scene::default(),
             piles: PileTracker::default(),
             pile_scene: PileScene::default(),
+            pile_pixels: None,
         })
         .collect()
 }
@@ -602,11 +622,14 @@ impl<'b> MainLoop<'b> {
             s.pile_scene.piles.clear();
             s.pile_scene.draws.clear();
             s.pile_scene.images.clear();
+            s.pile_scene.icicles.clear();
+            s.pile_scene.frost.clear();
+            let pixels = rasterize(&self.renderer, s.rect, &s.pile_scene, &mut s.pile_pixels);
             let frame = Frame {
                 flakes: &s.scene,
                 piles: &s.pile_scene,
                 sprites: self.renderer.sprites(),
-                images: self.renderer.images(),
+                pile_pixels: pixels,
             };
             self.backend.present(i, &frame)?;
             s.invalidate();
@@ -620,11 +643,12 @@ impl<'b> MainLoop<'b> {
                 .build_scene(&self.world, s.rect, &mut s.damage, &mut s.scene);
             self.renderer
                 .build_pile_scene(&self.world, s.rect, &mut s.piles, &mut s.pile_scene);
+            let pixels = rasterize(&self.renderer, s.rect, &s.pile_scene, &mut s.pile_pixels);
             let frame = Frame {
                 flakes: &s.scene,
                 piles: &s.pile_scene,
                 sprites: self.renderer.sprites(),
-                images: self.renderer.images(),
+                pile_pixels: pixels,
             };
             self.backend.present(i, &frame)?;
         }

@@ -273,3 +273,18 @@ decided and why.
   Homepage/source URL `github.com/flurry-snow/flurry` is a **placeholder** until the project has a
   real repository. `render-test` now also draws a fake app window, which gives the README GIF
   (`docs/flurry.gif`, 640×360, 384 KB).
+- **Piles are drawn on the CPU and uploaded, not drawn with XRender trapezoids** (fix after user
+  report: "laggs all the time, snowballs appear disappear every second"). On this Intel laptop Xorg
+  runs `modesetting` + glamor, which has no GPU path for TriStrip/Triangles: every pile draw read
+  the window back to the CPU, drew there and uploaded it again. Measured: piles took 20–45 ms per
+  frame (flakes 0.2 ms), above the 33 ms frame budget. While that ran, the compositor could show
+  the cleared-but-not-redrawn area, so the snowballs (drawn last) blinked. Now the existing
+  tiny-skia renderer (`rasterize_piles`, already used by `render-test`) draws only the damaged
+  rects into a per-output CPU pixmap, and each damaged rect goes to the window in one `PutImage`.
+  The compositor never sees a half-drawn area. Overlapping rects are merged into their bounding box.
+  `rasterize_piles` now builds one clip mask per frame (a separate one only when a window above cuts
+  into the damage) instead of one full-screen mask per pile and icicle. Snowball/snowman images are
+  no longer uploaded to the X server. Measured on the same desktop, 30 fps, battery: busy time per
+  frame 12 ms → 0.75 ms. Added CPU: flurry 2.0%, Xorg +3.3%, Cinnamon +5.6% = ~11% total (under
+  12%). A synthetic mouse sweep that rolled 7 balls, captured at 30 fps for 3 s, showed no frames
+  with balls missing.

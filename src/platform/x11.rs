@@ -23,14 +23,15 @@ use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::randr::{self, ConnectionExt as _};
 use x11rb::protocol::render::{
     self, ChangePictureAux, ConnectionExt as _, CreatePictureAux, Glyphinfo, PictOp, PictType,
-    Pictformat, Pointfix,
+    Pictformat,
 };
 use x11rb::protocol::shape::{self, ConnectionExt as _};
 use x11rb::protocol::xinput::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ChangeWindowAttributesAux, ClipOrdering, ColormapAlloc, ConfigureWindowAux,
-    ConnectionExt as _, CreateWindowAux, EventMask, GetPropertyReply, GrabMode, Keycode, MapState,
-    ModMask, PropMode, Rectangle, Screen, StackMode, VisualClass, Visualid, Window, WindowClass,
+    ConnectionExt as _, CreateWindowAux, EventMask, Gcontext, GetPropertyReply, GrabMode, Keycode,
+    MapState, ModMask, PropMode, Rectangle, Screen, StackMode, VisualClass, Visualid, Window,
+    WindowClass,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
@@ -39,10 +40,7 @@ use x11rb::wrapper::ConnectionExt as _;
 use super::{filter_outputs, Backend, BackendEvent, BackendOptions, Frame, Hotkey};
 use crate::config::Layering;
 use crate::geom::{subtract, AppWindow, CursorState, OutputInfo, Rect, WindowRect};
-use crate::render::{
-    copy_rgba_to_bgra, layer_rgb, ImageSheet, PileDraw, PileScene, SpriteDraw, SpriteSheet,
-    ICE_FILL, ICE_SHINE, PILE_FILL, PILE_SHADOW, PILE_SHADOW_OFFSET,
-};
+use crate::render::{copy_rgba_to_bgra, layer_rgb, SpriteDraw, SpriteSheet};
 use crate::sim::flakes::Layer;
 
 pub const NO_COMPOSITOR_MSG: &str = "no compositing manager is running on this X screen, \
@@ -161,6 +159,8 @@ struct Win {
 struct Surface {
     flakes: Win,
     piles: Option<Win>,
+    /// Depth-32 GC for uploading pile pixels to `piles`.
+    piles_gc: Option<Gcontext>,
     /// Current input region of the piles window (empty = click-through).
     input: Vec<Rect>,
 }
@@ -170,12 +170,6 @@ struct Paints {
     glyphs: render::Glyphset,
     /// Solid-fill source pictures.
     layers: [render::Picture; 3],
-    pile_fill: render::Picture,
-    pile_shadow: render::Picture,
-    ice_fill: render::Picture,
-    ice_shine: render::Picture,
-    /// Uploaded images (snowballs, snowmen) by id: picture, width, height.
-    images: Vec<(render::Picture, u16, u16)>,
 }
 
 /// What a batch of X events asks for.
@@ -215,7 +209,8 @@ pub struct X11Backend {
     /// Reused encoding buffers.
     cmds: Vec<u8>,
     rects: Vec<Rectangle>,
-    points: Vec<Pointfix>,
+    /// Scratch buffer for pile uploads.
+    upload: Vec<u8>,
     hotkey: Option<Keycode>,
     last_hotkey: Option<Instant>,
     /// Raises caused per window in the current second, and windows we stopped
@@ -301,7 +296,7 @@ impl X11Backend {
             layering_check_at: None,
             cmds: Vec::new(),
             rects: Vec::new(),
-            points: Vec::new(),
+            upload: Vec::new(),
             hotkey: None,
             last_hotkey: None,
             raises: (None, HashMap::new()),
@@ -427,9 +422,22 @@ impl X11Backend {
                     Some(w)
                 }
             };
+            let piles_gc = match piles {
+                Some(w) => {
+                    let gc = self.conn.generate_id()?;
+                    self.conn.create_gc(
+                        gc,
+                        w.window,
+                        &x11rb::protocol::xproto::CreateGCAux::new(),
+                    )?;
+                    Some(gc)
+                }
+                None => None,
+            };
             self.surfaces.push(Surface {
                 flakes,
                 piles,
+                piles_gc,
                 input: Vec::new(),
             });
         }
@@ -626,6 +634,9 @@ impl X11Backend {
 
     fn destroy_surfaces(&mut self) -> Result<()> {
         for s in self.surfaces.drain(..) {
+            if let Some(gc) = s.piles_gc {
+                self.conn.free_gc(gc)?;
+            }
             for w in std::iter::once(s.flakes).chain(s.piles) {
                 self.conn.render_free_picture(w.picture)?;
                 self.conn.destroy_window(w.window)?;
@@ -1343,59 +1354,7 @@ impl X11Backend {
             layers[layer.index()] = self.solid([r, g, b, 255])?;
         }
         log::debug!("uploaded {} sprites as XRender glyphs", sheet.len());
-        Ok(Paints {
-            glyphs,
-            layers,
-            pile_fill: self.solid(PILE_FILL)?,
-            pile_shadow: self.solid(PILE_SHADOW)?,
-            ice_fill: self.solid(ICE_FILL)?,
-            ice_shine: self.solid(ICE_SHINE)?,
-            images: Vec::new(),
-        })
-    }
-
-    /// Upload images the server doesn't have yet (they never change).
-    fn upload_images(&mut self, sheet: &ImageSheet, drawable: Window) -> Result<()> {
-        let have = self.paints.as_ref().map_or(0, |p| p.images.len());
-        for id in have..sheet.len() {
-            let uploaded = sheet.with(id as u32, |pm| -> Result<(render::Picture, u16, u16)> {
-                let (w, h) = (pm.width() as u16, pm.height() as u16);
-                let pixmap = self.conn.generate_id()?;
-                self.conn.create_pixmap(32, pixmap, drawable, w, h)?;
-                let gc = self.conn.generate_id()?;
-                self.conn
-                    .create_gc(gc, pixmap, &x11rb::protocol::xproto::CreateGCAux::new())?;
-                let mut bgra = vec![0; pm.data().len()];
-                copy_rgba_to_bgra(pm.data(), &mut bgra);
-                self.conn.put_image(
-                    x11rb::protocol::xproto::ImageFormat::Z_PIXMAP,
-                    pixmap,
-                    gc,
-                    w,
-                    h,
-                    0,
-                    0,
-                    0,
-                    32,
-                    &bgra,
-                )?;
-                let picture = self.conn.generate_id()?;
-                self.conn.render_create_picture(
-                    picture,
-                    pixmap,
-                    self.argb_format,
-                    &CreatePictureAux::new(),
-                )?;
-                // The picture keeps the pixmap alive.
-                self.conn.free_gc(gc)?;
-                self.conn.free_pixmap(pixmap)?;
-                Ok((picture, w, h))
-            });
-            if let (Some(p), Some(img)) = (self.paints.as_mut(), uploaded) {
-                p.images.push(img?);
-            }
-        }
-        Ok(())
+        Ok(Paints { glyphs, layers })
     }
 
     /// A solid-fill picture of straight (non-premultiplied) RGBA.
@@ -1474,130 +1433,54 @@ impl X11Backend {
     }
 
     /// Clear the scene's rects and redraw the piles there, clipped to them.
-    fn draw_piles(
+    /// Copy the changed parts of the CPU-drawn piles to the piles window.
+    /// Each rect goes in one PutImage, so the compositor never sees a
+    /// cleared-but-not-yet-redrawn area (no flicker), and nothing depends on
+    /// the driver accelerating trapezoids (glamor doesn't: it reads the whole
+    /// window back to the CPU, which made every frame take 20-40 ms).
+    fn upload_piles(
         &mut self,
-        picture: render::Picture,
-        scene: &PileScene,
-        sheet: &SpriteSheet,
+        window: Window,
+        gc: Gcontext,
+        pixels: &tiny_skia::Pixmap,
+        damage: &[Rect],
     ) -> Result<()> {
-        if scene.clear.is_empty() {
-            return Ok(());
-        }
-        let Some((fill, shadow)) = self.paints.as_ref().map(|p| (p.pile_fill, p.pile_shadow))
-        else {
-            return Ok(());
-        };
-        self.set_rects(&scene.clear);
-        self.conn
-            .render_set_picture_clip_rectangles(picture, 0, 0, &self.rects)?;
-        self.clear(picture, &scene.clear)?;
-        let max_points = self.max_request_items(8);
-        // The clip is the cleared area; piles with windows above them are
-        // clipped further so they stay hidden behind those windows.
-        let mut clipped = false;
-        for draw in &scene.piles {
-            if !draw.holes.is_empty() {
-                let open = subtract(&scene.clear, &draw.holes);
-                if open.is_empty() {
-                    continue;
+        let (pw, ph) = (pixels.width(), pixels.height());
+        let bounds = Rect::new(0, 0, pw, ph);
+        let rects = coalesce(damage, &bounds);
+        let max = self.conn.maximum_request_bytes().saturating_sub(64);
+        let src = pixels.data();
+        for r in rects {
+            let row_bytes = r.w as usize * 4;
+            let rows_per = (max / row_bytes).max(1);
+            let mut y = 0;
+            while y < r.h as usize {
+                let n = rows_per.min(r.h as usize - y);
+                self.upload.clear();
+                self.upload.resize(row_bytes * n, 0);
+                for k in 0..n {
+                    let sy = r.y as usize + y + k;
+                    let start = (sy * pw as usize + r.x as usize) * 4;
+                    copy_rgba_to_bgra(
+                        &src[start..start + row_bytes],
+                        &mut self.upload[k * row_bytes..(k + 1) * row_bytes],
+                    );
                 }
-                self.set_rects(&open);
-                self.conn
-                    .render_set_picture_clip_rectangles(picture, 0, 0, &self.rects)?;
-                clipped = true;
-            } else if clipped {
-                self.set_rects(&scene.clear);
-                self.conn
-                    .render_set_picture_clip_rectangles(picture, 0, 0, &self.rects)?;
-                clipped = false;
-            }
-            for (src, dy) in [(shadow, PILE_SHADOW_OFFSET), (fill, 0.0)] {
-                strip_points(draw, dy, &mut self.points);
-                // Overlapping chunks (by 2 points) keep the strip continuous.
-                let mut start = 0;
-                while start + 2 < self.points.len() {
-                    let end = (start + max_points).min(self.points.len());
-                    self.conn.render_tri_strip(
-                        PictOp::OVER,
-                        src,
-                        picture,
-                        self.a8_format,
-                        0,
-                        0,
-                        &self.points[start..end],
-                    )?;
-                    start = end - 2;
-                }
-            }
-        }
-        // Icicles, clipped by whatever is stacked above what they hang from.
-        let ice = self.paints.as_ref().map(|p| (p.ice_fill, p.ice_shine));
-        for icicle in &scene.icicles {
-            let Some((fill, shine)) = ice else { break };
-            let open = subtract(&scene.clear, &icicle.holes);
-            if open.is_empty() {
-                continue;
-            }
-            self.set_rects(&open);
-            self.conn
-                .render_set_picture_clip_rectangles(picture, 0, 0, &self.rects)?;
-            clipped = true;
-            for ((tri, _), src) in icicle.triangles().into_iter().zip([fill, shine]) {
-                let p = |(x, y): (f32, f32)| Pointfix {
-                    x: fixed(x),
-                    y: fixed(y),
-                };
-                let t = render::Triangle {
-                    p1: p(tri[0]),
-                    p2: p(tri[1]),
-                    p3: p(tri[2]),
-                };
-                self.conn.render_triangles(
-                    PictOp::OVER,
-                    src,
-                    picture,
-                    self.a8_format,
+                self.conn.put_image(
+                    x11rb::protocol::xproto::ImageFormat::Z_PIXMAP,
+                    window,
+                    gc,
+                    r.w as u16,
+                    n as u16,
+                    r.x as i16,
+                    (r.y as usize + y) as i16,
                     0,
-                    0,
-                    &[t],
+                    32,
+                    &self.upload,
                 )?;
+                y += n;
             }
         }
-        // Flying snow, snowballs and snowmen go on top of everything.
-        if clipped {
-            self.set_rects(&scene.clear);
-            self.conn
-                .render_set_picture_clip_rectangles(picture, 0, 0, &self.rects)?;
-        }
-        if !scene.draws.is_empty() {
-            self.draw_sprites(picture, &scene.draws, sheet)?;
-        }
-        if !scene.frost.is_empty() {
-            self.draw_sprites(picture, &scene.frost, sheet)?;
-        }
-        if let Some(paints) = &self.paints {
-            for d in &scene.images {
-                let Some(&(src, w, h)) = paints.images.get(d.image as usize) else {
-                    continue;
-                };
-                self.conn.render_composite(
-                    PictOp::OVER,
-                    src,
-                    x11rb::NONE,
-                    picture,
-                    0,
-                    0,
-                    0,
-                    0,
-                    d.x as i16,
-                    d.y as i16,
-                    w,
-                    h,
-                )?;
-            }
-        }
-        self.conn
-            .render_change_picture(picture, &ChangePictureAux::new().clipmask(x11rb::NONE))?;
         Ok(())
     }
 }
@@ -1720,10 +1603,8 @@ impl Backend for X11Backend {
             .surfaces
             .get(output)
             .context("present: no such output")?;
-        let (flakes, piles) = (s.flakes.picture, s.piles.map(|p| p.picture));
-        if !frame.piles.images.is_empty() {
-            self.upload_images(frame.images, s.flakes.window)?;
-        }
+        let flakes = s.flakes.picture;
+        let piles = s.piles.map(|p| p.window).zip(s.piles_gc);
         if !frame.flakes.clear.is_empty() || !frame.flakes.draws.is_empty() {
             self.clear(flakes, &frame.flakes.clear)?;
             let masked = self.mode == Mode::Mask;
@@ -1750,8 +1631,10 @@ impl Backend for X11Backend {
                 )?;
             }
         }
-        if let Some(piles) = piles {
-            self.draw_piles(piles, frame.piles, frame.sprites)?;
+        if let (Some((window, gc)), Some(pixels)) = (piles, frame.pile_pixels) {
+            if !frame.piles.clear.is_empty() {
+                self.upload_piles(window, gc, pixels, &frame.piles.clear)?;
+            }
         }
         // One round trip per frame: back-pressure if the server falls behind.
         self.conn.get_input_focus()?.reply()?;
@@ -1816,13 +1699,7 @@ impl Drop for X11Backend {
     fn drop(&mut self) {
         if let Some(p) = self.paints.take() {
             let _ = self.conn.render_free_glyph_set(p.glyphs);
-            let images = p.images.iter().map(|i| i.0);
-            for pic in p
-                .layers
-                .into_iter()
-                .chain([p.pile_fill, p.pile_shadow, p.ice_fill, p.ice_shine])
-                .chain(images)
-            {
+            for pic in p.layers {
                 let _ = self.conn.render_free_picture(pic);
             }
         }
@@ -1841,21 +1718,20 @@ fn to_x_rect(r: &Rect) -> Rectangle {
     }
 }
 
-fn fixed(v: f32) -> i32 {
-    (v * 65536.0).round() as i32
-}
-
-/// Triangle strip filling a pile: (base, top) pairs along its outline,
-/// shifted down by `dy`.
-fn strip_points(draw: &PileDraw, dy: f32, out: &mut Vec<Pointfix>) {
-    out.clear();
-    for (x, top) in draw.outline() {
-        for y in [draw.base_y + dy, top + dy] {
-            out.push(Pointfix {
-                x: fixed(x),
-                y: fixed(y),
-            });
-        }
+/// Damage rects clipped to `bounds`, with heavy overlap merged: many
+/// rects become their bounding box when that isn't much bigger.
+fn coalesce(rects: &[Rect], bounds: &Rect) -> Vec<Rect> {
+    let clipped: Vec<Rect> = rects.iter().filter_map(|r| r.intersect(bounds)).collect();
+    let Some(first) = clipped.first() else {
+        return clipped;
+    };
+    let bbox = clipped.iter().fold(*first, |a, r| a.union(r));
+    let area = |r: &Rect| u64::from(r.w) * u64::from(r.h);
+    let sum: u64 = clipped.iter().map(area).sum();
+    if clipped.len() > 64 || area(&bbox) <= sum + sum / 2 {
+        vec![bbox]
+    } else {
+        clipped
     }
 }
 
@@ -1983,17 +1859,18 @@ mod tests {
     }
 
     #[test]
-    fn pile_strip_alternates_base_and_top() {
-        let draw = PileDraw {
-            x0: 0.0,
-            base_y: 10.0,
-            heights: vec![2.0],
-            holes: Vec::new(),
-        };
-        let mut pts = Vec::new();
-        strip_points(&draw, 0.0, &mut pts);
-        let ys: Vec<i32> = pts.iter().map(|p| p.y >> 16).collect();
-        assert_eq!(ys, [10, 8, 10, 8, 10, 8]);
-        assert_eq!(pts[2].x, fixed(1.0));
+    fn coalesce_merges_overlap_and_clips() {
+        let b = Rect::new(0, 0, 100, 100);
+        // Heavily overlapping: one bounding box.
+        assert_eq!(
+            coalesce(&[Rect::new(0, 0, 50, 50), Rect::new(10, 10, 50, 50)], &b),
+            vec![Rect::new(0, 0, 60, 60)]
+        );
+        // Far apart: kept separate, and clipped to the screen.
+        assert_eq!(
+            coalesce(&[Rect::new(0, 0, 10, 10), Rect::new(95, 95, 10, 10)], &b),
+            vec![Rect::new(0, 0, 10, 10), Rect::new(95, 95, 5, 5)]
+        );
+        assert!(coalesce(&[Rect::new(200, 200, 5, 5)], &b).is_empty());
     }
 }

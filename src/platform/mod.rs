@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crate::config::{Layering, Monitors};
 use crate::geom::{AppWindow, CursorState, OutputInfo, Rect, WindowRect};
-use crate::render::{ImageSheet, PileScene, Scene, SpriteSheet};
+use crate::render::{PileScene, Scene, SpriteSheet};
 use anyhow::{bail, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -44,7 +44,9 @@ pub struct Frame<'a> {
     /// Settled snow, drawn on top of everything.
     pub piles: &'a PileScene,
     pub sprites: &'a SpriteSheet,
-    pub images: &'a ImageSheet,
+    /// The piles drawn on the CPU (output-sized, premultiplied RGBA);
+    /// backends upload `piles.clear` from it.
+    pub pile_pixels: Option<&'a tiny_skia::Pixmap>,
 }
 
 /// A global key combination such as `super+shift+s`.

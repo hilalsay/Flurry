@@ -42,6 +42,15 @@ impl Rect {
         let y1 = self.bottom().min(other.bottom());
         (x1 > x0 && y1 > y0).then(|| Rect::new(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32))
     }
+
+    /// Smallest rect containing both.
+    pub fn union(&self, other: &Rect) -> Rect {
+        let x0 = self.x.min(other.x);
+        let y0 = self.y.min(other.y);
+        let x1 = self.right().max(other.right());
+        let y1 = self.bottom().max(other.bottom());
+        Rect::new(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32)
+    }
 }
 
 /// One monitor, in global coordinates.
