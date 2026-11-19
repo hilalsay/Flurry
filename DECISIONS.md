@@ -288,3 +288,5 @@ decided and why.
   frame 12 ms → 0.75 ms. Added CPU: flurry 2.0%, Xorg +3.3%, Cinnamon +5.6% = ~11% total (under
   12%). A synthetic mouse sweep that rolled 7 balls, captured at 30 fps for 3 s, showed no frames
   with balls missing.
+- **No icicles on the panel** (user request: the taskbar icicles aren't needed). Icicles now only
+  grow from the bottom edges of snowy windows. Test: `no_icicles_on_the_panel`.

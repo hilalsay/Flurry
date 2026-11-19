@@ -1,6 +1,6 @@
 //! Icicles (feature 2): they grow slowly from the bottom edge of a window
-//! whose top has had snow for a while, and from the top edge of a snowy
-//! panel. They drip now and then. Flinging the window snaps them off: they
+//! whose top has had snow for a while (not from the panel: the user found
+//! them distracting there). They drip now and then. Flinging the window snaps them off: they
 //! fall and shatter into loose snow. Without snow they slowly melt away.
 
 use std::collections::HashMap;
@@ -25,7 +25,6 @@ const GRAVITY: f32 = 700.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EdgeKey {
     Window(u64),
-    Panel(u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,7 +42,7 @@ struct Edge {
     snowy_for: f32,
     /// Where the edge hangs (global): left x, y, width.
     at: (f32, f32, f32),
-    /// Stacking depth of its window/panel.
+    /// Stacking depth of its window.
     z: i32,
 }
 
@@ -102,7 +101,7 @@ impl Icicles {
         for (key, e) in &self.edges {
             let (x0, y, _) = e.at;
             let tag = match key {
-                EdgeKey::Window(id) | EdgeKey::Panel(id) => *id,
+                EdgeKey::Window(id) => *id,
             };
             for (i, s) in e.seeds.iter().enumerate() {
                 if s.length >= 1.0 {
@@ -135,15 +134,6 @@ impl Icicles {
                     (r.x as f32, r.bottom() as f32, r.w as f32),
                 ));
             }
-        }
-        for o in &inputs.obstacles {
-            let r = o.rect;
-            v.push((
-                EdgeKey::Panel(o.id),
-                SurfaceKey::Obstacle(o.id),
-                crate::sim::piles::Z_PANEL,
-                (r.x as f32, r.y as f32, r.w as f32),
-            ));
         }
         v
     }
@@ -385,5 +375,31 @@ mod tests {
         }
         assert!(ice.all().is_empty(), "shattered");
         assert!(parts.len() > before, "into loose snow");
+    }
+
+    #[test]
+    fn no_icicles_on_the_panel() {
+        let panel = Rect::new(0, 1040, 1920, 40);
+        let inp = Inputs {
+            obstacles: vec![crate::geom::WindowRect { id: 1, rect: panel }],
+            windows: Vec::new(),
+            ..inputs(Rect::new(0, 0, 1, 1))
+        };
+        let (mut ice, mut piles, mut parts) =
+            (Icicles::default(), Piles::default(), Particles::new(0));
+        piles.sync(&inp, 40.0, 1.0, 0.0, &mut parts);
+        for x in (0..1920).step_by(3) {
+            piles.land(x as f32, 990.0, 1045.0, 1.0, 40.0, 40.0);
+        }
+        for _ in 0..60 * 120 {
+            ice.step(
+                1.0 / 60.0,
+                &inp,
+                &mut piles,
+                &mut parts,
+                Rect::new(0, 0, 1920, 1080),
+            );
+        }
+        assert!(ice.all().is_empty());
     }
 }
