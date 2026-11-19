@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Desktop snow for Linux"
 license = "MIT"
+readme = "README.md"
+keywords = ["snow", "desktop", "x11", "winter", "overlay"]
+categories = ["gui"]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -24,3 +27,4 @@ zbus = { version = "5.19.0", default-features = false, features = ["async-io", "
 
 [profile.release]
 lto = "thin"
+strip = true

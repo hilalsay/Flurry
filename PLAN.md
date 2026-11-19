@@ -323,9 +323,9 @@ The first instance owns the socket; later invocations send the command and exit.
 | 5 | Piles on windows | ✅ (manual check by me) |
 | 6 | Snowballs and snowman | ✅ (manual check by me) |
 | 7 | Being a good citizen (auto-pause, battery, autostart) | ✅ (manual check by me) |
-| 8 | Signature features (§12) | |
+| 8 | Signature features (§12) | ✅ (manual check by me) |
 | 9 | Wayland + KDE (layer-shell, KWin script) — deferred | |
-| 10 | Packaging (.deb for Mint first, then AppImage, AUR) | |
+| 10 | Packaging (.deb for Mint first, then AppImage, AUR) | ✅ (done before 9; install check by me) |
 
 ### Phase 0 — Scaffold
 - `cargo new`, module skeleton as in §4, `clap` CLI, config loading with defaults, `env_logger`.

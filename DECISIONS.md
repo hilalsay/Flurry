@@ -258,3 +258,18 @@ decided and why.
   snow and snowballs were already simulated in global coordinates; a two-monitor test now checks that
   snow thrown from monitor A reaches and is drawn on monitor B. With `cross_monitor = false`, flying
   snow stops at the side edge of the monitor it is on.
+- **Phase 10 done before Phase 9.** Phase 9 (Wayland/KDE) needs a Wayland compositor to build and test
+  against, and none is installed here (sway is available from apt but not installed). Packaging
+  could be built and verified fully on this machine, so it went first. Reversible: Phase 9 is
+  next.
+- **Phase 10: packaging.** `scripts/build-deb.sh` builds the `.deb` with plain `dpkg-deb` (no
+  cargo-deb). The binary is pure Rust (x11rb's own X11 connection, no libxcb), so it depends only
+  on `libc6 (>= 2.34)` and `libgcc-s1`. Recommends `libglib2.0-bin` (gsettings → DND); Suggests
+  `curl` (weather), `pulseaudio-utils` (parec → music wind), `pipewire-bin` (pw-dump). The release
+  build is stripped (10 → 7.7 MB). It installs the binary, a desktop entry, an SVG icon and the docs.
+  Checked: package metadata and contents, the extracted binary runs, and `cargo install --path .`
+  works. **Not checked:** installing it with `apt` (needs sudo) and the AppImage/PKGBUILD builds
+  (no `appimagetool`/`makepkg` here; the AppImage script doesn't download anything itself). The
+  Homepage/source URL `github.com/flurry-snow/flurry` is a **placeholder** until the project has a
+  real repository. `render-test` now also draws a fake app window, which gives the README GIF
+  (`docs/flurry.gif`, 640×360, 384 KB).

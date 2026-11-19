@@ -29,7 +29,7 @@ pub fn entry(exe: &Path) -> String {
          Name=Flurry\n\
          Comment=Snow falling over your desktop\n\
          Exec={exec}\n\
-         Icon=weather-snow\n\
+         Icon=flurry\n\
          Terminal=false\n\
          Categories=Utility;\n\
          X-GNOME-Autostart-enabled=true\n\

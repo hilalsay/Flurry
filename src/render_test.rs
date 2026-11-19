@@ -11,7 +11,7 @@ use tiny_skia::{
 };
 
 use crate::config::Config;
-use crate::geom::{Inputs, OutputInfo, Rect, WindowRect};
+use crate::geom::{AppWindow, Inputs, OutputInfo, Rect, WindowRect};
 use crate::render::{PileScene, PileTracker, Renderer};
 use crate::sim::{SimParams, World};
 
@@ -19,6 +19,8 @@ const W: u32 = 1920;
 const H: u32 = 1080;
 const DT: f32 = 1.0 / 60.0;
 const PANEL: Rect = Rect::new(0, H as i32 - 40, W, 40);
+/// A fake app window, so snow on windows and flakes behind them show up.
+const WINDOW: Rect = Rect::new(560, 330, 800, 440);
 
 /// `warmup`: seconds to simulate before the first frame (lets piles build up).
 pub fn run(config: &Config, frames: u32, out: &Path, seed: u64, warmup: f32) -> Result<()> {
@@ -31,6 +33,12 @@ pub fn run(config: &Config, frames: u32, out: &Path, seed: u64, warmup: f32) -> 
     let inputs = Inputs {
         outputs: vec![output.clone()],
         obstacles: vec![WindowRect { id: 1, rect: PANEL }],
+        windows: vec![AppWindow {
+            id: 2,
+            rect: WINDOW,
+            collects: true,
+            pid: None,
+        }],
         ..Inputs::default()
     };
     let mut world = World::new(SimParams::from_config(config), seed);
@@ -42,6 +50,7 @@ pub fn run(config: &Config, frames: u32, out: &Path, seed: u64, warmup: f32) -> 
     let mut snow = Pixmap::new(W, H).context("cannot allocate pixmap")?;
     let background = background()?;
     let panel = panel()?;
+    let window = window()?;
     let mut frame = background.clone();
     let (mut sim_time, mut render_time) = (Duration::ZERO, Duration::ZERO);
 
@@ -64,7 +73,7 @@ pub fn run(config: &Config, frames: u32, out: &Path, seed: u64, warmup: f32) -> 
         render_time += t.elapsed();
 
         frame.data_mut().copy_from_slice(background.data());
-        for layer in [&snow, &panel, &piles] {
+        for layer in [&snow, &window, &panel, &piles] {
             frame.draw_pixmap(
                 0,
                 0,
@@ -127,5 +136,39 @@ fn panel() -> Result<Pixmap> {
     )
     .context("bad rect")?;
     pm.fill_rect(rect, &paint, Transform::identity(), None);
+    Ok(pm)
+}
+
+/// A dark app window with a lighter title bar.
+fn window() -> Result<Pixmap> {
+    let mut pm = Pixmap::new(W, H).context("cannot allocate pixmap")?;
+    let r = |x: i32, y: i32, w: u32, h: u32| {
+        tiny_skia::Rect::from_xywh(x as f32, y as f32, w as f32, h as f32).context("bad rect")
+    };
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(30, 32, 38, 255);
+    pm.fill_rect(
+        r(WINDOW.x, WINDOW.y, WINDOW.w, WINDOW.h)?,
+        &paint,
+        Transform::identity(),
+        None,
+    );
+    paint.set_color_rgba8(58, 62, 72, 255);
+    pm.fill_rect(
+        r(WINDOW.x, WINDOW.y, WINDOW.w, 34)?,
+        &paint,
+        Transform::identity(),
+        None,
+    );
+    // Some "text" lines.
+    paint.set_color_rgba8(90, 160, 110, 255);
+    for (i, w) in [520u32, 380, 610, 300, 450].iter().enumerate() {
+        pm.fill_rect(
+            r(WINDOW.x + 24, WINDOW.y + 60 + 28 * i as i32, *w, 10)?,
+            &paint,
+            Transform::identity(),
+            None,
+        );
+    }
     Ok(pm)
 }

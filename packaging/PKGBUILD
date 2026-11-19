@@ -1,0 +1,38 @@
+# Maintainer: flurry authors
+pkgname=flurry
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Snow falling over your Linux desktop, piling up on your windows"
+arch=('x86_64' 'aarch64')
+url="https://github.com/flurry-snow/flurry"
+license=('MIT')
+depends=('gcc-libs' 'glibc')
+optdepends=('curl: real weather mode'
+            'libpulse: music makes wind (parec)'
+            'pipewire: screen-share detection (pw-dump)')
+makedepends=('cargo')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  cargo test --frozen --lib
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/flurry "$pkgdir/usr/bin/flurry"
+  install -Dm644 packaging/flurry.desktop "$pkgdir/usr/share/applications/flurry.desktop"
+  install -Dm644 packaging/flurry.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/flurry.svg"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

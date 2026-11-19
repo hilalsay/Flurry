@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Flurry
+GenericName=Desktop snow
+Comment=Snow falling over your desktop, piling up on your windows
+Exec=flurry
+Icon=flurry
+Terminal=false
+Categories=Utility;Amusement;
+Keywords=snow;winter;christmas;desktop;
+StartupNotify=false
