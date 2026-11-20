@@ -404,3 +404,12 @@ decided and why.
     typing shakes snow, the screen-sharing pause on Wayland.
   - Status: compiles, unit-tested (provider parsing, pixel copy); **not yet run on a live
     compositor**: `sway` and `kwin-wayland` are being installed for that.
+
+- **KDE X11: snow window hid the wallpaper** (user report: "shows full black instead of my own
+  wallpaper"). KWin paints `_NET_WM_WINDOW_TYPE_DESKTOP` windows as the opaque backdrop, so our
+  transparent flakes window covered the wallpaper and desktop icons with black (frost and flakes
+  still showed on it). On KDE (`XDG_CURRENT_DESKTOP`/`KDE_FULL_SESSION`) the flakes window is now a
+  NORMAL window with `_NET_WM_STATE_BELOW`, skip-taskbar/pager and `_KDE_NET_WM_STATE_SKIP_SWITCHER`:
+  KWin keeps it below all apps and blends it. Verified live on Plasma 5.27: wallpaper and icons
+  show, layering check passes, a click on a desktop icon reaches plasmashell. Our own windows are
+  now also skipped explicitly in the client list (they used to be skipped by type).

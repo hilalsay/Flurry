@@ -64,6 +64,7 @@ x11rb::atom_manager! {
         _NET_WM_STATE_SKIP_PAGER,
         _NET_WM_STATE_STICKY,
         _NET_WM_STATE_BELOW,
+        _KDE_NET_WM_STATE_SKIP_SWITCHER,
         _NET_WM_DESKTOP,
         _NET_WM_BYPASS_COMPOSITOR,
         _NET_CLIENT_LIST,
@@ -557,12 +558,20 @@ impl X11Backend {
     fn set_desktop_properties(&self, window: Window, rect: Rect) -> Result<()> {
         let c = &self.conn;
         let a = &self.atoms;
+        // KWin paints desktop-type windows as the opaque backdrop, hiding
+        // the wallpaper and icons; there a normal window kept below all
+        // others does the job, and KWin blends it like any other.
+        let kind = if is_kde() {
+            a._NET_WM_WINDOW_TYPE_NORMAL
+        } else {
+            a._NET_WM_WINDOW_TYPE_DESKTOP
+        };
         c.change_property32(
             PropMode::REPLACE,
             window,
             a._NET_WM_WINDOW_TYPE,
             AtomEnum::ATOM,
-            &[a._NET_WM_WINDOW_TYPE_DESKTOP],
+            &[kind],
         )?;
         c.change_property32(
             PropMode::REPLACE,
@@ -572,6 +581,7 @@ impl X11Backend {
             &[
                 a._NET_WM_STATE_SKIP_TASKBAR,
                 a._NET_WM_STATE_SKIP_PAGER,
+                a._KDE_NET_WM_STATE_SKIP_SWITCHER,
                 a._NET_WM_STATE_STICKY,
                 a._NET_WM_STATE_BELOW,
             ],
@@ -951,6 +961,7 @@ impl X11Backend {
             };
             if ty.contains(&a._NET_WM_WINDOW_TYPE_DESKTOP)
                 || ty.contains(&a._NET_WM_WINDOW_TYPE_DOCK)
+                || self.is_ours(w)
             {
                 continue;
             }
@@ -1786,6 +1797,12 @@ fn coalesce(rects: &[Rect], bounds: &Rect) -> Vec<Rect> {
     }
     out.sort_by_key(|r| (r.y, r.x));
     out
+}
+
+/// Running under KDE Plasma (KWin)?
+fn is_kde() -> bool {
+    let var = |k: &str| std::env::var(k).unwrap_or_default().to_ascii_lowercase();
+    var("XDG_CURRENT_DESKTOP").contains("kde") || var("KDE_FULL_SESSION") == "true"
 }
 
 /// Encode draws as GLYPHELT32 items: one glyph each, positioned relative to
