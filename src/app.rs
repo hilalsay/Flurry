@@ -231,6 +231,8 @@ struct Stats {
     /// Busy time per phase: sim, flake scene, pile scene, pile raster,
     /// present, input regions.
     phases: [Duration; 6],
+    /// Pixels cleared and redrawn: flakes window, piles window.
+    area: [u64; 2],
 }
 
 /// `PauseReason` ordered by name, for stable status output.
@@ -683,6 +685,13 @@ impl<'b> MainLoop<'b> {
             let t2 = Instant::now();
             let pixels = rasterize(&self.renderer, s.rect, &s.pile_scene, &mut s.pile_pixels);
             let t3 = Instant::now();
+            let area = |rs: &[Rect]| {
+                rs.iter()
+                    .map(|r| u64::from(r.w) * u64::from(r.h))
+                    .sum::<u64>()
+            };
+            self.stats.area[0] += area(&s.scene.clear);
+            self.stats.area[1] += area(&s.pile_scene.clear);
             ph[1] += t1 - t;
             ph[2] += t2 - t1;
             ph[3] += t3 - t2;
@@ -739,11 +748,13 @@ impl<'b> MainLoop<'b> {
             log::debug!(
                 "{} frames in {:.1?}, avg {:?} busy per frame, {} flakes \
                  (sim {sim:?}, flakes {flakes:?}, piles {piles:?}, raster {raster:?}, \
-                 present {present:?}, input {input:?})",
+                 present {present:?}, input {input:?}; px/frame flakes {} piles {})",
                 s.frames,
                 since.elapsed(),
                 s.busy / n,
-                self.world.flakes().len()
+                self.world.flakes().len(),
+                s.area[0] / u64::from(n),
+                s.area[1] / u64::from(n),
             );
             *s = Stats::default();
         }

@@ -512,6 +512,16 @@ pub struct IcicleDraw {
 }
 
 impl IcicleDraw {
+    /// The area it may cover (output-local).
+    pub fn bounds(&self) -> Rect {
+        Rect::new(
+            (self.x - self.w / 2.0).floor() as i32 - 1,
+            self.y.floor() as i32 - 1,
+            self.w.ceil() as u32 + 3,
+            self.length.ceil() as u32 + 3,
+        )
+    }
+
     /// The body and the glint, as triangles.
     pub fn triangles(&self) -> [(Triangle, [u8; 4]); 2] {
         let (x, y, h, l) = (self.x, self.y, self.w / 2.0, self.length);
@@ -529,7 +539,12 @@ impl IcicleDraw {
     }
 }
 /// Redraw a column once its height changed by this much (px).
-const PILE_REDRAW_STEP: f32 = 0.25;
+const PILE_REDRAW_STEP: f32 = 0.5;
+/// A pile column that changed this much since drawn is redrawn at once.
+const PILE_FAST_STEP: f32 = 2.0;
+/// Slow changes (snow settling, melting, icicles growing) are drawn every
+/// this many frames: at 30 fps, ~8 times a second.
+const SLOW_EVERY: u64 = 4;
 /// Extra space around a pile that its drawing may touch (shadow, AA).
 const PILE_PAD: f32 = 4.0;
 
@@ -670,6 +685,10 @@ pub struct PileTracker {
     icicles: HashMap<u64, ((i32, i32, i32), Rect)>,
     /// Frost on screen: cell (global x, y) → sprite.
     frost: HashMap<(i32, i32), u32>,
+    /// Frames built, for showing slow changes every `SLOW_EVERY` frames.
+    frame: u64,
+    /// The frost version `frost` was built from.
+    frost_version: Option<u64>,
 }
 
 impl Default for PileTracker {
@@ -681,6 +700,8 @@ impl Default for PileTracker {
             images: Vec::new(),
             icicles: HashMap::new(),
             frost: HashMap::new(),
+            frame: 0,
+            frost_version: None,
         }
     }
 }
@@ -693,6 +714,7 @@ impl PileTracker {
         self.images.clear();
         self.icicles.clear();
         self.frost.clear();
+        self.frost_version = None;
     }
 }
 
@@ -723,14 +745,20 @@ fn clip_to(r: Rect, w: u32, h: u32) -> Option<Rect> {
 }
 
 /// Columns of `s` whose height moved by `PILE_REDRAW_STEP` since `drawn`.
-fn changed_span(s: &Surface, drawn: &[f32]) -> Option<(usize, usize)> {
+/// The columns of `s` that differ from what was drawn. Slow changes (snow
+/// settling, melting) show only on `slow_tick` frames; a big change (the
+/// cursor writing or scooping, a storm) shows at once.
+fn changed_span(s: &Surface, drawn: &[f32], slow_tick: bool) -> Option<(usize, usize)> {
     let mut span: Option<(usize, usize)> = None;
+    let mut most = 0.0f32;
     for (i, (h, d)) in s.heights.iter().zip(drawn).enumerate() {
-        if (h - d).abs() >= PILE_REDRAW_STEP {
+        let diff = (h - d).abs();
+        if diff >= PILE_REDRAW_STEP {
+            most = most.max(diff);
             span = Some(span.map_or((i, i + 1), |(a, _)| (a, i + 1)));
         }
     }
-    span
+    span.filter(|_| slow_tick || most >= PILE_FAST_STEP)
 }
 
 impl Renderer {
@@ -744,6 +772,8 @@ impl Renderer {
     ) {
         scene.clear.clear();
         scene.piles.clear();
+        tracker.frame += 1;
+        let slow_tick = tracker.frame.is_multiple_of(SLOW_EVERY);
         let max_h = world.params().max_pile_height;
         let (w, h) = (output.w, output.h);
         if std::mem::take(&mut tracker.full) {
@@ -764,7 +794,7 @@ impl Renderer {
                         && d.heights.len() == s.heights.len()
                         && d.holes == holes =>
                 {
-                    let span = changed_span(s, &d.heights);
+                    let span = changed_span(s, &d.heights, slow_tick);
                     if let Some((a, b)) = span {
                         d.heights[a..b].copy_from_slice(&s.heights[a..b]);
                     }
@@ -805,7 +835,7 @@ impl Renderer {
         });
         self.particle_draws(world, output, &mut tracker.particles, scene);
         self.image_draws(world, output, tracker, scene);
-        self.icicle_draws(world, output, tracker, scene);
+        self.icicle_draws(world, output, tracker, scene, slow_tick);
         self.frost_draws(world, output, tracker, scene);
         self.pile_draws(world, output, scene);
     }
@@ -822,14 +852,25 @@ impl Renderer {
         use crate::sim::frost::CELL;
         scene.frost.clear();
         let (w, h) = (output.w, output.h);
-        let mut now = HashMap::new();
-        for c in world.frost() {
-            let local = Rect::new(c.x - output.x, c.y - output.y, CELL as u32, CELL as u32);
-            if clip_to(local, w, h).is_some() {
-                now.insert((c.x, c.y), self.sheet.frost(c.variant, c.level));
-            }
+        let version = world.frost_version();
+        let unchanged = tracker.frost_version == Some(version);
+        tracker.frost_version = Some(version);
+        if unchanged && tracker.frost.is_empty() {
+            return;
         }
-        if now != tracker.frost {
+        let now = if unchanged {
+            std::mem::take(&mut tracker.frost)
+        } else {
+            let mut now = HashMap::new();
+            for c in world.frost() {
+                let local = Rect::new(c.x - output.x, c.y - output.y, CELL as u32, CELL as u32);
+                if clip_to(local, w, h).is_some() {
+                    now.insert((c.x, c.y), self.sheet.frost(c.variant, c.level));
+                }
+            }
+            now
+        };
+        if !unchanged && now != tracker.frost {
             let cell_rect = |&(x, y): &(i32, i32)| {
                 clip_to(
                     Rect::new(x - output.x, y - output.y, CELL as u32, CELL as u32),
@@ -871,6 +912,7 @@ impl Renderer {
         output: Rect,
         tracker: &mut PileTracker,
         scene: &mut PileScene,
+        slow_tick: bool,
     ) {
         scene.icicles.clear();
         let (w, h) = (output.w, output.h);
@@ -892,13 +934,19 @@ impl Renderer {
                 y.round() as i32,
                 ice.length.round() as i32,
             );
-            match tracker.icicles.insert(ice.id, (shape, rect)) {
+            match tracker.icicles.get(&ice.id).copied() {
                 Some((old, _)) if old == shape => {}
+                // Only grown or shrunk: a slow change.
+                Some((old, _)) if old.0 == shape.0 && old.1 == shape.1 && !slow_tick => {}
                 Some((_, old_rect)) => {
+                    tracker.icicles.insert(ice.id, (shape, rect));
                     scene.clear.extend(clip_to(old_rect, w, h));
                     scene.clear.extend(clip_to(rect, w, h));
                 }
-                None => scene.clear.extend(clip_to(rect, w, h)),
+                None => {
+                    tracker.icicles.insert(ice.id, (shape, rect));
+                    scene.clear.extend(clip_to(rect, w, h));
+                }
             }
             let holes = world
                 .occluders()
@@ -1107,7 +1155,8 @@ impl Renderer {
                 );
             }
         }
-        for ice in &scene.icicles {
+        let touches = |r: Rect| scene.clear.iter().any(|c| c.intersect(&r).is_some());
+        for ice in scene.icicles.iter().filter(|i| touches(i.bounds())) {
             let own = clip_for(&ice.holes);
             let clip = match &own {
                 None => base,
@@ -1152,6 +1201,10 @@ impl Renderer {
             return;
         }
         for d in &scene.images {
+            let size = self.images.with(d.image, |img| (img.width(), img.height()));
+            if size.is_some_and(|(w, h)| !touches(Rect::new(d.x, d.y, w, h))) {
+                continue;
+            }
             let own = clip_for(&d.holes);
             let clip = match &own {
                 None => base,
@@ -1390,6 +1443,85 @@ mod tests {
     use super::*;
     use crate::sim::test_util::inputs_1080p;
     use crate::sim::SimParams;
+
+    /// What one frame costs at 1080p with a snowy window and panel, after
+    /// 5 minutes of snow: pixels redrawn and CPU time per phase. A tool for
+    /// making flurry lighter: `cargo test --release frame_costs -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn frame_costs() {
+        use crate::geom::{AppWindow, WindowRect};
+        use std::time::{Duration, Instant};
+        let mut inputs = inputs_1080p();
+        inputs.obstacles.push(WindowRect {
+            id: 1,
+            rect: Rect::new(0, 1040, 1920, 40),
+        });
+        inputs.windows.push(AppWindow {
+            id: 42,
+            rect: Rect::new(400, 300, 900, 500),
+            collects: true,
+            pid: None,
+        });
+        let off = |v: &str| std::env::var(v).is_ok();
+        let mut params = SimParams::default();
+        params.icicles &= !off("NO_ICE");
+        if off("NO_FROST") {
+            params.frost_after = None;
+        }
+        let mut w = World::new(params, 3);
+        for _ in 0..60 * 300 {
+            w.step(1.0 / 60.0, &inputs);
+        }
+        let r = Renderer::new();
+        let out = Rect::new(0, 0, 1920, 1080);
+        let (mut dmg, mut scene) = (Damage::new(0, 0), Scene::default());
+        let (mut tracker, mut ps) = (PileTracker::default(), PileScene::default());
+        let mut pixmap = Pixmap::new(1920, 1080).unwrap();
+        let frames = 300u32;
+        let (mut t, mut area, mut pile_frames) = ([Duration::ZERO; 4], [0u64; 2], 0);
+        let (mut flying, mut icicles) = (0u32, 0u32);
+        let px = |rs: &[Rect]| {
+            rs.iter()
+                .map(|r| u64::from(r.w) * u64::from(r.h))
+                .sum::<u64>()
+        };
+        for f in 0..frames + 2 {
+            let t0 = Instant::now();
+            w.step(1.0 / 60.0, &inputs);
+            w.step(1.0 / 60.0, &inputs);
+            let t1 = Instant::now();
+            r.build_scene(&w, out, &mut dmg, &mut scene);
+            let t2 = Instant::now();
+            r.build_pile_scene(&w, out, &mut tracker, &mut ps);
+            let t3 = Instant::now();
+            if !ps.clear.is_empty() {
+                r.rasterize_piles(&ps, &mut pixmap);
+            }
+            let t4 = Instant::now();
+            if f < 2 {
+                continue; // first frames draw everything
+            }
+            for (i, d) in [t1 - t0, t2 - t1, t3 - t2, t4 - t3].into_iter().enumerate() {
+                t[i] += d;
+            }
+            area[0] += px(&scene.clear);
+            area[1] += px(&ps.clear);
+            pile_frames += u32::from(!ps.clear.is_empty());
+            flying += w.particles().len() as u32;
+            icicles += ps.icicles.len() as u32;
+        }
+        let [sim, flakes, piles, raster] = t.map(|d| d / frames);
+        eprintln!(
+            "per frame: sim {sim:?} flakes {flakes:?} piles {piles:?} raster {raster:?}; \
+             px flakes {} piles {}; piles redrawn in {pile_frames}/{frames} frames; \
+             avg particles {} icicles {}",
+            area[0] / u64::from(frames),
+            area[1] / u64::from(frames),
+            flying / frames,
+            icicles / frames,
+        );
+    }
 
     #[test]
     fn rgba_to_bgra_swaps_red_and_blue() {

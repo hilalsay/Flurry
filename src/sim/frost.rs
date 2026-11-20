@@ -182,6 +182,9 @@ pub struct Frost {
     time: f32,
     /// Some cell may be frosted (cheap check before touching every cell).
     any: bool,
+    /// Bumped whenever a cell may have changed, so drawing can skip
+    /// unchanged frames.
+    version: u64,
     last_cursor: Option<(f32, f32)>,
     rng: fastrand::Rng,
 }
@@ -196,6 +199,7 @@ impl Default for Frost {
             tick: 0.0,
             time: 0.0,
             any: false,
+            version: 0,
             last_cursor: None,
             rng: fastrand::Rng::with_seed(0x0F20_57ED),
         }
@@ -205,6 +209,7 @@ impl Default for Frost {
 impl Frost {
     pub fn clear(&mut self) {
         if self.any {
+            self.version += 1;
             for p in &mut self.panes {
                 p.density.fill(0.0);
             }
@@ -213,9 +218,15 @@ impl Frost {
         self.reach = 0.0;
     }
 
+    /// Changes whenever [`cells`](Self::cells) may have changed.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     /// Frosted cells (density quantised to levels), global coordinates.
     pub fn cells(&self) -> impl Iterator<Item = FrostCell> + '_ {
-        self.panes.iter().flat_map(|p| {
+        let panes = if self.any { &self.panes[..] } else { &[] };
+        panes.iter().flat_map(|p| {
             p.density.iter().enumerate().filter_map(move |(i, &d)| {
                 let level = (d * LEVELS as f32).round() as u8;
                 (level > 0).then(|| FrostCell {
@@ -241,6 +252,7 @@ impl Frost {
         let rects: Vec<Rect> = outputs.iter().map(|o| o.rect).collect();
         if self.panes.iter().map(|p| p.rect).ne(rects.iter().copied()) {
             self.panes = rects.iter().map(|r| Pane::new(*r, &mut self.rng)).collect();
+            self.version += 1;
         }
         let Some(c) = cursor else {
             self.clear();
@@ -248,6 +260,9 @@ impl Frost {
         };
         let moved = self.last_cursor.is_some_and(|(x, y)| (x, y) != (c.x, c.y));
         if moved {
+            if self.any {
+                self.version += 1;
+            }
             let from = self.last_cursor.unwrap_or((c.x, c.y));
             let now = self.time;
             for p in &mut self.panes {
@@ -270,6 +285,9 @@ impl Frost {
             return;
         }
         let elapsed = std::mem::take(&mut self.tick);
+        if self.any {
+            self.version += 1;
+        }
         let frosting = self.idle >= idle_after;
         if frosting {
             self.reach = (self.reach + REACH_GROWTH * elapsed).min(MAX_REACH);
@@ -301,6 +319,7 @@ impl Frost {
                 p.grow(reach, now, &mut self.rng);
             }
             self.any = true;
+            self.version += 1;
         }
     }
 }

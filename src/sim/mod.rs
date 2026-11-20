@@ -149,6 +149,11 @@ impl World {
         self.frost.cells()
     }
 
+    /// Changes whenever [`frost`](Self::frost) may have changed.
+    pub fn frost_version(&self) -> u64 {
+        self.frost.version()
+    }
+
     /// Hanging and falling icicles.
     pub fn icicles(&self) -> Vec<icicles::Icicle> {
         if self.params.icicles {

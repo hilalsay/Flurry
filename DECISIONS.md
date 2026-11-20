@@ -367,3 +367,16 @@ decided and why.
   pile scene, pile raster, present and input regions.
 - Leaves/blossom modes were started and dropped (kept in `git stash`): the user wants flurry to
   stay distinct from Snowhush and to get lighter instead.
+
+- **Lighter pile layer** (measured with the new `frame_costs` bench: 1080p, a snowy window and
+  panel, after 5 simulated minutes; `cargo test --release frame_costs -- --ignored --nocapture`,
+  `NO_ICE=1` / `NO_FROST=1` to switch those off):
+  - Slow changes (settling, melting, icicles growing) are drawn every 4th frame (~8×/s at 30 fps);
+    a column that changed ≥ 2 px (writing, scooping, storm) or anything that moves still shows at
+    once. Redraw threshold 0.25 → 0.5 px.
+  - Rasterizing skips icicles and snowballs that don't touch a cleared rect (every icicle used to be
+    re-filled on every pile redraw).
+  - Frost keeps a version counter; the renderer reuses its cell map while it is unchanged, and an
+    empty frost layer yields no cells without scanning ~14,000 cells.
+  - Per frame: pile scene 77 → 18 µs, pile raster 274 → 85 µs (flake scene 54 µs, sim 54 µs
+    unchanged). The remaining pile redraws are real motion (snow dripping off window edges).
