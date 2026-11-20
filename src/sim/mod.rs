@@ -299,9 +299,21 @@ impl World {
         }
         let monitors: Vec<Rect> = inputs.outputs.iter().map(|o| o.rect).collect();
         let confine = (!self.params.cross_monitor).then_some(monitors.as_slice());
+        let mut bursts = Vec::new();
         self.particles.step(dt, &bounds, confine, |p, y_before| {
-            piles.land(p.x, y_before, p.y, p.radius(), p.volume, max_h)
+            if !p.is_lump() {
+                return piles.land(p.x, y_before, p.y, p.radius(), p.volume, max_h);
+            }
+            let powder = p.volume * particles::BURST_SHARE;
+            let landed = piles.land(p.x, y_before, p.y, p.radius(), p.volume - powder, max_h);
+            if landed {
+                bursts.push((p.x, p.y, powder));
+            }
+            landed
         });
+        for (x, y, v) in bursts {
+            self.particles.burst(x, y, v);
+        }
         if self.params.typing_shakes_snow && inputs.keys_pressed > 0 {
             if let Some(id) = inputs.active_window {
                 self.piles
@@ -654,6 +666,44 @@ mod tests {
             drawn_on_b |= !scene.draws.is_empty();
         }
         (max_x, drawn_on_b)
+    }
+
+    #[test]
+    fn a_dropped_lump_bursts_into_powder_and_keeps_its_snow() {
+        let mut w = World::new(
+            SimParams {
+                flake_count: 0,
+                melt_rate: 0.0,
+                ..SimParams::default()
+            },
+            1,
+        );
+        let inputs = inputs_1080p();
+        w.step(1.0 / 60.0, &inputs);
+        let lump = particles::Particle {
+            x: 900.0,
+            y: 300.0,
+            vx: 0.0,
+            vy: 0.0,
+            volume: 200.0,
+        };
+        assert!(lump.is_lump() && lump.clump().len() > 3, "drawn as a clump");
+        w.particles.spawn(lump, 0.0);
+        let (mut burst, mut rising) = (false, 0);
+        for _ in 0..60 * 6 {
+            w.step(1.0 / 60.0, &inputs);
+            let ps: Vec<_> = w.particles().iter().copied().collect();
+            if ps.len() > 1 {
+                burst = true;
+                assert!(ps.iter().all(|p| !p.is_lump()), "powder, not lumps");
+                rising = rising.max(ps.iter().filter(|p| p.vy < 0.0).count());
+            }
+        }
+        assert!(burst, "it burst where it landed");
+        assert!(rising >= 3, "powder flew up ({rising})");
+        assert!(w.particles().is_empty(), "the powder settled");
+        let total = w.piles().volume();
+        assert!((total - 200.0).abs() < 1.0, "snow kept: {total}");
     }
 
     #[test]

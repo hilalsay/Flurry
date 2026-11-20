@@ -998,13 +998,15 @@ impl Renderer {
         scene.draws.clear();
         let (w, h) = (output.w as i32, output.h as i32);
         for p in world.particles().iter() {
-            let draw = self.place_at(p.x, p.y, p.radius(), Layer::Near, output);
-            let size = self.sheet.get(draw.sprite).size as i32;
-            if draw.x + size <= 0 || draw.y + size <= 0 || draw.x >= w || draw.y >= h {
-                continue;
+            for (dx, dy, r) in p.clump() {
+                let draw = self.place_at(p.x + dx, p.y + dy, r, Layer::Near, output);
+                let size = self.sheet.get(draw.sprite).size as i32;
+                if draw.x + size <= 0 || draw.y + size <= 0 || draw.x >= w || draw.y >= h {
+                    continue;
+                }
+                damage.mark(draw.x, draw.y, draw.x + size, draw.y + size);
+                scene.draws.push(draw);
             }
-            damage.mark(draw.x, draw.y, draw.x + size, draw.y + size);
-            scene.draws.push(draw);
         }
         damage.compute_rects();
         scene.clear.extend_from_slice(&damage.rects);

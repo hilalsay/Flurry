@@ -348,3 +348,13 @@ decided and why.
   small glyphs, uploaded once. No subpixel variants: they're big enough that 1 px steps don't
   show. A/B on the live desktop, flurry alone: old 4.2–4.4%, new 4.4–4.9%, within the noise.
   Tests: `crystal_sprites_have_six_arms`, `some_near_flakes_are_crystals_never_far_ones`.
+
+- **Closed windows drop their snow in lumps** (idea from looking at Snowhush; own code, no code
+  copied, its license is PolyForm Noncommercial). A closed or maximized window's pile now falls as
+  ~170 px² lumps, drawn as a clump of 5 discs, instead of 36 px² grains. A lump that lands puts
+  65% of its snow on the pile and bursts the other 35% up as 9 powder grains, which settle again;
+  total snow is conserved. A "lump" is any particle carrying ≥ 100 px², so the 13 places that spawn
+  particles needed no change. Minimized windows still keep their snow parked and get it back
+  (kept on purpose: nicer than losing it).
+  Tests: `a_closed_window_drops_its_snow_in_lumps`,
+  `a_dropped_lump_bursts_into_powder_and_keeps_its_snow`.

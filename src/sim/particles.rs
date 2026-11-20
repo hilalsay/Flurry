@@ -12,6 +12,15 @@ const DRAG: f32 = 0.6;
 pub const PARTICLE_VOLUME: f32 = 36.0;
 /// Upper bound on live particles; beyond it, new ones carry more volume.
 const MAX_PARTICLES: usize = 3000;
+/// A particle carrying at least this much snow (px²) is a lump: it is drawn
+/// as a clump and bursts into powder where it lands.
+pub const LUMP_VOLUME: f32 = 100.0;
+/// Snow per lump when a closed window's pile drops (px²).
+pub const DROP_LUMP_VOLUME: f32 = 170.0;
+/// Share of a landing lump's snow that bursts up as powder; the rest settles.
+pub const BURST_SHARE: f32 = 0.35;
+/// Powder grains per burst.
+const BURST_GRAINS: usize = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Particle {
@@ -24,9 +33,36 @@ pub struct Particle {
 }
 
 impl Particle {
-    /// Drawn radius.
+    /// Drawn radius (a lump's whole clump; see [`Particle::clump`]).
     pub fn radius(&self) -> f32 {
-        (self.volume / std::f32::consts::PI).sqrt().clamp(1.2, 4.0)
+        let r = (self.volume / std::f32::consts::PI).sqrt();
+        if self.is_lump() {
+            r.clamp(4.0, 9.0)
+        } else {
+            r.clamp(1.2, 4.0)
+        }
+    }
+
+    pub fn is_lump(&self) -> bool {
+        self.volume >= LUMP_VOLUME
+    }
+
+    /// The discs (dx, dy, r) a lump is drawn as, so it looks clumpy rather
+    /// than round; a plain particle is one disc.
+    pub fn clump(&self) -> Vec<(f32, f32, f32)> {
+        if !self.is_lump() {
+            return vec![(0.0, 0.0, self.radius())];
+        }
+        let r = self.radius();
+        // Tumbles a little as it falls.
+        let turn = (self.x * 0.05 + self.y * 0.03).sin() * 0.6;
+        let mut discs = vec![(0.0, 0.0, 4.0f32.min(r * 0.6))];
+        for (k, s) in [(0.0, 0.95), (2.1, 0.8), (4.0, 0.9), (5.2, 0.7)] {
+            let a: f32 = k + turn;
+            let d = r - 3.0;
+            discs.push((a.cos() * d, a.sin() * d * 0.8, 3.0 + s));
+        }
+        discs
     }
 }
 
@@ -63,6 +99,22 @@ impl Particles {
     /// Total snow in flight (px²).
     pub fn volume(&self) -> f32 {
         self.list.iter().map(|p| p.volume).sum()
+    }
+
+    /// A landed lump at (`x`, `y`) bursts: `volume` of powder flies up and
+    /// out as small grains, which then settle again.
+    pub fn burst(&mut self, x: f32, y: f32, volume: f32) {
+        let grain = volume / BURST_GRAINS as f32;
+        for _ in 0..BURST_GRAINS {
+            let side = (self.rng.f32() - 0.5) * 2.0;
+            self.list.push(Particle {
+                x: x + side * 4.0,
+                y: y - 2.0,
+                vx: side * 170.0,
+                vy: -(90.0 + self.rng.f32() * 150.0),
+                volume: grain,
+            });
+        }
     }
 
     /// Add `p`, jittering its velocity by up to `spread` px/s.

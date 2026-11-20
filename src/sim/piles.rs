@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use crate::geom::{Inputs, Rect};
-use crate::sim::particles::{Particle, Particles, PARTICLE_VOLUME};
+use crate::sim::particles::{Particle, Particles, DROP_LUMP_VOLUME, PARTICLE_VOLUME};
 
 /// Column width in px.
 pub const COL_W: f32 = 2.0;
@@ -203,6 +203,47 @@ impl Surface {
                 acc = 0.0;
             }
             *h = 0.0;
+        }
+    }
+
+    /// The window under this pile closed or maximized: its snow drops in
+    /// lumps, which burst into powder where they land.
+    fn drop_lumps(&mut self, particles: &mut Particles) {
+        let mut acc = 0.0;
+        let mut first = None;
+        for (i, h) in self.heights.iter_mut().enumerate() {
+            let x = self.x0 + (i as f32 + 0.5) * COL_W;
+            first.get_or_insert(x);
+            acc += *h * COL_W;
+            *h = 0.0;
+            if acc >= DROP_LUMP_VOLUME {
+                let cx = (first.take().unwrap_or(x) + x) / 2.0;
+                particles.spawn(
+                    Particle {
+                        x: cx,
+                        y: self.y - 4.0,
+                        vx: 0.0,
+                        vy: 20.0,
+                        volume: acc,
+                    },
+                    18.0,
+                );
+                acc = 0.0;
+            }
+        }
+        if acc > 0.0 {
+            // The tail end: loose snow, not a lump.
+            let x = first.unwrap_or(self.x0);
+            particles.spawn(
+                Particle {
+                    x,
+                    y: self.y - 2.0,
+                    vx: 0.0,
+                    vy: 20.0,
+                    volume: acc,
+                },
+                18.0,
+            );
         }
     }
 
@@ -468,7 +509,7 @@ impl Piles {
                         },
                     );
                 }
-                SurfaceKey::Window(_) => s.shatter((0.0, 0.0), particles),
+                SurfaceKey::Window(_) => s.drop_lumps(particles),
                 _ => {} // a panel/ground stretch vanished: its snow goes with it
             }
         }
@@ -837,6 +878,22 @@ mod tests {
         assert!(p.volume() < before);
         p.step(1e6, 1.0, 40.0, &mut parts, &HashMap::new());
         assert_eq!(p.volume(), 0.0);
+    }
+
+    #[test]
+    fn a_closed_window_drops_its_snow_in_lumps() {
+        let (mut p, mut parts) = (Piles::default(), Particles::new(0));
+        let vol = snowy_window(&mut p, &mut parts);
+        parts.clear();
+        sync(&mut p, &layout(Some(BOTTOM_PANEL)), 10.0, &mut parts);
+        assert!(window_pile(&p).is_none());
+        assert!((parts.volume() - vol).abs() < 1.0, "all of it falls");
+        let lumps = parts.iter().filter(|q| q.is_lump()).count();
+        assert!(
+            lumps >= 2 && lumps * 2 >= parts.len(),
+            "{lumps} lumps of {}",
+            parts.len()
+        );
     }
 
     #[test]
