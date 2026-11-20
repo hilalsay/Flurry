@@ -324,7 +324,7 @@ The first instance owns the socket; later invocations send the command and exit.
 | 6 | Snowballs and snowman | ✅ (manual check by me) |
 | 7 | Being a good citizen (auto-pause, battery, autostart) | ✅ (manual check by me) |
 | 8 | Signature features (§12) | ✅ (manual check by me) |
-| 9 | Wayland + KDE (layer-shell, KWin script) — deferred | |
+| 9 | Wayland + KDE (layer-shell, KWin script) | ✅ (headless Sway and KWin checked by Claude; HiDPI, hotkey, typing still open) |
 | 10 | Packaging (.deb for Mint first, then AppImage, AUR) | ✅ (done before 9; install check by me) |
 
 ### Phase 0 — Scaffold

@@ -126,7 +126,9 @@ fn from_report(r: &Report, cursor: Option<(f32, f32)>) -> Snapshot {
         cursor,
         ..Snapshot::default()
     };
-    for w in &r.windows {
+    let me = i64::from(std::process::id());
+    // KWin lists our own layer surfaces as windows too.
+    for w in r.windows.iter().filter(|w| w.pid != me) {
         let id = id_of(&w.id);
         let rect = Rect::new(w.x, w.y, w.w.max(0) as u32, w.h.max(0) as u32);
         if w.active {
@@ -162,6 +164,7 @@ struct Bridge {
 #[zbus::interface(name = "org.flurry.Flurry")]
 impl Bridge {
     fn windows(&self, json: String) {
+        log::trace!("kwin report: {json}");
         match serde_json::from_str::<Report>(&json) {
             Ok(r) => self.shared.publish(from_report(&r, self.shared.cursor())),
             Err(e) => log::debug!("kwin bridge: bad report ({e}): {json:.200}"),

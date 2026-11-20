@@ -10,9 +10,12 @@ snowman, knock icicles down, or start a snow storm.
 It runs quietly in the background, using a few percent of one CPU core, and pauses itself when you
 watch a fullscreen video, play a game or share your screen.
 
-> **Works on:** Linux Mint (Cinnamon) and other X11 desktops that have a compositor: GNOME on Xorg,
-> XFCE, MATE and KDE Plasma (X11). **Wayland is not supported yet.** If you are on Wayland, choose
-> an "Xorg" or "X11" session on the login screen.
+> **Works on:**
+> - **X11:** Linux Mint (Cinnamon), KDE Plasma, GNOME on Xorg, XFCE and MATE (with a compositor).
+> - **Wayland:** KDE Plasma, Sway and Hyprland, plus other compositors with layer-shell (on those,
+>   snow piles only at the bottom of the screen, since they don't say where windows are).
+> - **GNOME on Wayland:** flurry runs through XWayland, so snow falls and piles at the bottom, but it
+>   can't stay behind native Wayland windows. For the full effect, pick "GNOME on Xorg" at login.
 
 ---
 
@@ -215,6 +218,8 @@ weather_city = "Oslo"
 | **No ❄ in the tray on GNOME** | Install the *AppIndicator* GNOME extension, or use the terminal commands. |
 | **Super + Shift + S does nothing** | Another program already uses that shortcut. Change `hotkey` in the settings, or bind `flurry toggle` to a key in your keyboard settings. |
 | **The snow stopped** | It may have paused itself (fullscreen window, screen sharing, Do Not Disturb). `flurry status` tells you why. |
+| **Wayland: no snow on windows** | flurry knows where windows are on KDE Plasma, Sway and Hyprland. On other compositors, snow piles only at the bottom of the screen. |
+| **Wayland: Super + Shift + S does nothing** | Wayland doesn't let apps grab global shortcuts. Bind `flurry toggle` to a key in your desktop's keyboard settings. |
 | **Something else** | Run `RUST_LOG=debug flurry` in a terminal to see what it detects: monitors, taskbars, windows. |
 
 ---

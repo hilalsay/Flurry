@@ -413,3 +413,11 @@ decided and why.
   KWin keeps it below all apps and blends it. Verified live on Plasma 5.27: wallpaper and icons
   show, layering check passes, a click on a desktop icon reaches plasmashell. Our own windows are
   now also skipped explicitly in the client list (they used to be skipped by type).
+- **Wayland checked live** (2026-11-20), on headless compositors:
+  - Sway 1.9 (`WLR_BACKENDS=headless`, screenshot via a small wlr-screencopy tool): flakes behind a
+    floating Konsole, a pile on its title bar, the bar's space found from the work area. flurry
+    ~3.8% CPU.
+  - KWin 5.27 `--virtual` in its own `dbus-run-session`: the bridge script loads, reports Konsole
+    (moved by a test script) and snow settles on it. Found and fixed: KWin lists flurry's own layer
+    surfaces as normal windows (two full-screen "windows" that hid every other one); reports now
+    drop windows with our pid.
