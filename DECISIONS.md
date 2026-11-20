@@ -358,3 +358,12 @@ decided and why.
   (kept on purpose: nicer than losing it).
   Tests: `a_closed_window_drops_its_snow_in_lumps`,
   `a_dropped_lump_bursts_into_powder_and_keeps_its_snow`.
+
+- **Paused flurry spun a whole core** (found while measuring, 2026-11-20): while hidden, the main
+  loop set `next_frame = now` every pass, so `dispatch` got a zero timeout and the loop never slept:
+  99.6% of a core while paused, locked or fullscreen. It now waits `MAX_WAIT` (100 ms) for events
+  while hidden: 0.2%. Test: `paused_main_loop_sleeps_instead_of_spinning`.
+- The per-frame stats log (`RUST_LOG=flurry=debug`) now splits busy time into sim, flake scene,
+  pile scene, pile raster, present and input regions.
+- Leaves/blossom modes were started and dropped (kept in `git stash`): the user wants flurry to
+  stay distinct from Snowhush and to get lighter instead.

@@ -175,6 +175,17 @@ impl Drop for KillOnDrop {
     }
 }
 
+/// How long the main loop may sleep waiting for events: until the next
+/// frame while snow shows; while hidden (paused), the longest wait, so a
+/// paused flurry sleeps instead of spinning.
+fn idle_wait(showing: bool, next_frame: Instant, now: Instant) -> Duration {
+    if showing {
+        next_frame.saturating_duration_since(now).min(MAX_WAIT)
+    } else {
+        MAX_WAIT
+    }
+}
+
 fn tray_state(config: &Config, paused: bool) -> TrayState {
     TrayState {
         paused,
@@ -217,6 +228,9 @@ struct Stats {
     since: Option<Instant>,
     frames: u32,
     busy: Duration,
+    /// Busy time per phase: sim, flake scene, pile scene, pile raster,
+    /// present, input regions.
+    phases: [Duration; 6],
 }
 
 /// `PauseReason` ordered by name, for stable status output.
@@ -296,8 +310,8 @@ impl<'b> MainLoop<'b> {
         let mut acc = Duration::ZERO;
         let mut next_frame = last;
         loop {
-            let until_frame = next_frame.saturating_duration_since(Instant::now());
-            for event in self.backend.dispatch(until_frame.min(MAX_WAIT))? {
+            let wait = idle_wait(self.showing, next_frame, Instant::now());
+            for event in self.backend.dispatch(wait)? {
                 self.handle_event(event)?;
             }
             if let Flow::Quit = self.handle_commands()? {
@@ -321,14 +335,18 @@ impl<'b> MainLoop<'b> {
             } else {
                 None
             };
+            let t = Instant::now();
             while acc >= STEP {
                 self.world.step(STEP.as_secs_f32(), &self.inputs);
                 // Key presses count once, in the first step that sees them.
                 self.inputs.keys_pressed = 0;
                 acc -= STEP;
             }
+            self.stats.phases[0] += t.elapsed();
             self.draw()?;
+            let t = Instant::now();
             self.update_grab_regions()?;
+            self.stats.phases[5] += t.elapsed();
             self.record(now);
             next_frame += self.frame_interval;
             if next_frame < now {
@@ -654,12 +672,20 @@ impl<'b> MainLoop<'b> {
     }
 
     fn draw(&mut self) -> Result<()> {
+        let ph = &mut self.stats.phases;
         for (i, s) in self.surfaces.iter_mut().enumerate() {
+            let t = Instant::now();
             self.renderer
                 .build_scene(&self.world, s.rect, &mut s.damage, &mut s.scene);
+            let t1 = Instant::now();
             self.renderer
                 .build_pile_scene(&self.world, s.rect, &mut s.piles, &mut s.pile_scene);
+            let t2 = Instant::now();
             let pixels = rasterize(&self.renderer, s.rect, &s.pile_scene, &mut s.pile_pixels);
+            let t3 = Instant::now();
+            ph[1] += t1 - t;
+            ph[2] += t2 - t1;
+            ph[3] += t3 - t2;
             let frame = Frame {
                 flakes: &s.scene,
                 piles: &s.pile_scene,
@@ -667,6 +693,7 @@ impl<'b> MainLoop<'b> {
                 pile_pixels: pixels,
             };
             self.backend.present(i, &frame)?;
+            ph[4] += t3.elapsed();
         }
         Ok(())
     }
@@ -707,14 +734,34 @@ impl<'b> MainLoop<'b> {
         s.busy += frame_start.elapsed();
         let since = *s.since.get_or_insert(frame_start);
         if since.elapsed() >= STATS_EVERY {
+            let n = s.frames.max(1);
+            let [sim, flakes, piles, raster, present, input] = s.phases.map(|d| d / n);
             log::debug!(
-                "{} frames in {:.1?}, avg {:?} busy per frame, {} flakes",
+                "{} frames in {:.1?}, avg {:?} busy per frame, {} flakes \
+                 (sim {sim:?}, flakes {flakes:?}, piles {piles:?}, raster {raster:?}, \
+                 present {present:?}, input {input:?})",
                 s.frames,
                 since.elapsed(),
-                s.busy / s.frames.max(1),
+                s.busy / n,
                 self.world.flakes().len()
             );
             *s = Stats::default();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paused_main_loop_sleeps_instead_of_spinning() {
+        let now = Instant::now();
+        // Hidden: the loop resets next_frame to now each pass; it must still wait.
+        assert_eq!(idle_wait(false, now, now), MAX_WAIT);
+        assert_eq!(idle_wait(true, now, now), Duration::ZERO);
+        let soon = now + Duration::from_millis(20);
+        assert_eq!(idle_wait(true, soon, now), Duration::from_millis(20));
+        assert_eq!(idle_wait(true, now + Duration::from_secs(5), now), MAX_WAIT);
     }
 }
