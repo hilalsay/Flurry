@@ -441,6 +441,7 @@ impl Renderer {
             w: pixmap.width() as i32,
             h: pixmap.height() as i32,
             data: pixmap.data_mut(),
+            bgra: false,
         };
         for r in &scene.clear {
             target.clear(r);
@@ -1117,6 +1118,7 @@ impl Renderer {
             w: pixmap.width() as i32,
             h: pixmap.height() as i32,
             data: pixmap.data_mut(),
+            bgra: false,
         };
         for r in &scene.clear {
             target.clear(r);
@@ -1185,6 +1187,7 @@ impl Renderer {
             w: pw as i32,
             h: ph as i32,
             data: pixmap.data_mut(),
+            bgra: false,
         };
         for d in &scene.draws {
             target.blit(self.sheet.get(d.sprite), d.x, d.y);
@@ -1193,6 +1196,7 @@ impl Renderer {
             w: pw as i32,
             h: ph as i32,
             data: pixmap.data_mut(),
+            bgra: false,
         };
         for d in &scene.frost {
             target.blit(self.sheet.get(d.sprite), d.x, d.y);
@@ -1375,6 +1379,37 @@ struct Target<'a> {
     w: i32,
     h: i32,
     data: &'a mut [u8],
+    /// Write BGRA (Wayland `ARGB8888`) instead of RGBA.
+    bgra: bool,
+}
+
+/// Replay flake frames into a premultiplied BGRA buffer (`w`×`h`, tightly
+/// packed) that last showed an older frame: clear every rect in `clears`
+/// (this frame's and the frames the buffer missed), then draw `draws`, the
+/// current frame's flakes. Lets a backend draw straight into a reused
+/// Wayland buffer without keeping a full-screen copy.
+pub fn replay_bgra(
+    clears: &[&[Rect]],
+    draws: &[SpriteDraw],
+    sheet: &SpriteSheet,
+    data: &mut [u8],
+    w: u32,
+    h: u32,
+) {
+    let mut target = Target {
+        w: w as i32,
+        h: h as i32,
+        data,
+        bgra: true,
+    };
+    for rects in clears {
+        for r in *rects {
+            target.clear(r);
+        }
+    }
+    for d in draws {
+        target.blit(sheet.get(d.sprite), d.x, d.y);
+    }
 }
 
 /// `v * a / 255`, rounded, for 8-bit values.
@@ -1413,7 +1448,12 @@ impl Target<'_> {
                 }
                 let di = dst_row + (x0 + sx) as usize * 4;
                 let inv = 255 - src[3];
-                for (d, &c) in self.data[di..di + 4].iter_mut().zip(src) {
+                let src = if self.bgra {
+                    [src[2], src[1], src[0], src[3]]
+                } else {
+                    [src[0], src[1], src[2], src[3]]
+                };
+                for (d, c) in self.data[di..di + 4].iter_mut().zip(src) {
                     *d = c.saturating_add(mul_div255(*d, inv));
                 }
             }

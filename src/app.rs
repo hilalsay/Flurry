@@ -500,7 +500,7 @@ impl<'b> MainLoop<'b> {
                 format!("fps {fps}")
             }
             Command::Play => {
-                "play mode isn't needed on X11: flurry already sees the real mouse".into()
+                "play mode isn't needed: point at the top of a snowball and drag it".into()
             }
             Command::Tornado => {
                 if self.showing {

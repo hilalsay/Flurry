@@ -167,23 +167,22 @@ pub fn select(requested: Option<BackendKind>, opts: &BackendOptions) -> Result<B
     let has_x11 = std::env::var_os("DISPLAY").is_some();
     let kind = match requested {
         Some(k) => k,
-        None if has_wayland && has_x11 => {
-            log::warn!(
-                "Wayland session detected, but the Wayland backend isn't built yet; \
-                 using X11 through XWayland (snow may not stay above native Wayland windows)"
-            );
-            BackendKind::X11
-        }
+        None if has_wayland => BackendKind::Wayland,
         None if has_x11 => BackendKind::X11,
-        None if has_wayland => {
-            bail!("Wayland session without XWayland: the Wayland backend isn't built yet")
-        }
         None => bail!("no display found: neither WAYLAND_DISPLAY nor DISPLAY is set"),
     };
     log::debug!("backend: {kind:?}");
     match kind {
         BackendKind::X11 => Ok(Box::new(x11::X11Backend::new(opts)?)),
-        BackendKind::Wayland => bail!("the Wayland backend isn't built yet; use --backend x11"),
+        BackendKind::Wayland => match wayland::WaylandBackend::new(opts) {
+            Ok(b) => Ok(Box::new(b)),
+            // GNOME has no layer-shell: XWayland still works, with less.
+            Err(e) if requested.is_none() && has_x11 => {
+                log::warn!("Wayland backend unavailable ({e:#}); using X11 through XWayland");
+                Ok(Box::new(x11::X11Backend::new(opts)?))
+            }
+            Err(e) => Err(e),
+        },
     }
 }
 
