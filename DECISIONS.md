@@ -380,3 +380,27 @@ decided and why.
     empty frost layer yields no cells without scanning ~14,000 cells.
   - Per frame: pile scene 77 → 18 µs, pile raster 274 → 85 µs (flake scene 54 µs, sim 54 µs
     unchanged). The remaining pile redraws are real motion (snow dripping off window edges).
+
+- **Wayland backend (Phase 9, first cut)**, requested by the user on 2026-11-20:
+  - Two wlr-layer-shell surfaces per monitor, mirroring the X11 two-window design: flakes on
+    `Bottom` (behind windows), piles on `Top` (above windows, below fullscreen and the lock screen).
+    Empty input region, except the snowball rects from `set_input_region`; there `wl_pointer` gives
+    the position and left button, so carrying works without "play mode".
+  - CPU drawing into `wl_shm` ARGB8888 buffers (≤ 3 per surface), at most one commit per frame
+    callback, `damage_buffer` with the changed rects. Flakes are replayed straight into a reused
+    buffer (clear everything any missed frame changed, draw all current flakes:
+    `render::replay_bgra`), so no full-screen flake copy is kept; piles copy changed rects from the
+    app's CPU raster.
+  - Window info per compositor (`platform::wininfo`), each in its own thread publishing snapshots:
+    Sway `GET_TREE`/`GET_WORKSPACES` at 10 Hz; Hyprland `j/clients`/`j/monitors` at 10 Hz and
+    `j/cursorpos` at 30 Hz; KDE a KWin script (Plasma 5 and 6 APIs) that pushes windows, work areas
+    and the cursor to our `org.flurry.Flurry` D-Bus service, unloaded on exit. Elsewhere: none.
+    The script is our own (Snowhush uses the same idea; no code taken).
+  - Panels come from work areas (output minus work area = obstacle strips), since layer-shell
+    doesn't tell where other surfaces are.
+  - On a Wayland session flurry now picks Wayland; without layer-shell (GNOME) it falls back to
+    X11 through XWayland.
+  - Not done yet: HiDPI buffers (buffer scale 1, the compositor upscales), the toggle hotkey,
+    typing shakes snow, the screen-sharing pause on Wayland.
+  - Status: compiles, unit-tested (provider parsing, pixel copy); **not yet run on a live
+    compositor**: `sway` and `kwin-wayland` are being installed for that.
