@@ -339,3 +339,12 @@ decided and why.
     where that stays compact.
   Tests: `storm_eases_in_and_out_and_ends`, `the_funnel_crosses_the_screen`,
   `a_tornado_storm_blows_and_ends`, `coalesce_merges_overlap_and_clips`.
+
+- **Snow crystals** (user request: "make some snowdrops look like real snow flakes"):
+  12% of mid and near flakes (`CRYSTAL_SHARE`) carry a crystal design (stellar dendrite, simple
+  star, fern, sectored plate) and a slow spin. They are drawn 2.4× their physics radius
+  (4–10 px), so landing and pile volume are unchanged. Pre-rendered with tiny-skia as extra
+  sprites: 2 layers × 4 designs × 7 sizes × 12 rotations over 60° (six-fold symmetry) = 672
+  small glyphs, uploaded once. No subpixel variants: they're big enough that 1 px steps don't
+  show. A/B on the live desktop, flurry alone: old 4.2–4.4%, new 4.4–4.9%, within the noise.
+  Tests: `crystal_sprites_have_six_arms`, `some_near_flakes_are_crystals_never_far_ones`.

@@ -22,6 +22,12 @@ const R_MIN: f32 = 0.75;
 const R_STEP: f32 = 0.25;
 /// Radii 0.75 ..= 4.0 px in 0.25 px steps.
 const BUCKETS: usize = 14;
+/// Crystal sprites: drawn radii 4 ..= 10 px (1 px steps) × rotations over
+/// 60° (they have six-fold symmetry) × designs × the mid and near layers.
+const CRYSTAL_R_MIN: f32 = 4.0;
+const CRYSTAL_SIZES: usize = 7;
+const CRYSTAL_ROTATIONS: usize = 12;
+const CRYSTAL_DESIGNS: usize = crate::sim::flakes::CRYSTAL_DESIGNS as usize;
 
 /// Flake colour per layer: slightly blue-grey far away, pure white up close.
 pub fn layer_rgb(layer: Layer) -> [u8; 3] {
@@ -162,7 +168,113 @@ fn frost_sprite(variant: usize, level: u8) -> Sprite {
     }
 }
 
+/// A six-armed snow crystal of drawn radius `r`, turned by `angle`, centred
+/// on the middle of pixel (`half`, `half`). Designs: 0 stellar dendrite
+/// (two pairs of side branches), 1 simple star with one pair near the tip,
+/// 2 fern-like (three short pairs), 3 sectored plate (hexagon + arms).
+fn crystal_sprite(design: usize, r: f32, angle: f32, layer: Layer) -> Sprite {
+    use std::f32::consts::FRAC_PI_3;
+    let half = (r + 1.0).ceil() as i32;
+    let size = (2 * half + 1) as u32;
+    let c = half as f32 + 0.5;
+    let mut pm = Pixmap::new(size, size).unwrap_or_else(|| unreachable!("small pixmap"));
+    let branches: &[(f32, f32)] = match design {
+        0 => &[(0.42, 0.38), (0.68, 0.26)],
+        1 => &[(0.62, 0.32)],
+        2 => &[(0.32, 0.2), (0.52, 0.22), (0.72, 0.16)],
+        _ => &[(0.62, 0.2)],
+    };
+    let mut pb = PathBuilder::new();
+    for k in 0..6 {
+        let a = angle + k as f32 * FRAC_PI_3;
+        let (dx, dy) = (a.cos(), a.sin());
+        pb.move_to(c, c);
+        pb.line_to(c + dx * r, c + dy * r);
+        for &(t, l) in branches {
+            let (px, py) = (c + dx * r * t, c + dy * r * t);
+            for side in [-1.0, 1.0] {
+                let b = a + side * FRAC_PI_3;
+                pb.move_to(px, py);
+                pb.line_to(px + b.cos() * r * l, py + b.sin() * r * l);
+            }
+        }
+    }
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(255, 255, 255, 255);
+    paint.anti_alias = true;
+    if let Some(path) = pb.finish() {
+        let stroke = tiny_skia::Stroke {
+            width: (r * 0.15).clamp(0.9, 1.3),
+            line_cap: tiny_skia::LineCap::Round,
+            ..tiny_skia::Stroke::default()
+        };
+        pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+    // A small hexagonal core (a big one for the plate).
+    let core = if design == 3 { 0.42 } else { 0.16 } * r;
+    let mut pb = PathBuilder::new();
+    for k in 0..6 {
+        let a = angle + k as f32 * FRAC_PI_3;
+        let (x, y) = (c + a.cos() * core, c + a.sin() * core);
+        if k == 0 {
+            pb.move_to(x, y);
+        } else {
+            pb.line_to(x, y);
+        }
+    }
+    pb.close();
+    if let Some(path) = pb.finish() {
+        paint.set_color_rgba8(255, 255, 255, if design == 3 { 170 } else { 255 });
+        pm.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+    let rgb = layer_rgb(layer);
+    let alpha: Vec<u8> = pm
+        .data()
+        .chunks(4)
+        .map(|p| (f32::from(p[3]) * layer.alpha()).round() as u8)
+        .collect();
+    let rgba = alpha
+        .iter()
+        .flat_map(|&a| {
+            let [r, g, b] = rgb.map(|c| mul_div255(c, a));
+            [r, g, b, a]
+        })
+        .collect();
+    Sprite {
+        size,
+        layer,
+        half,
+        alpha,
+        rgba,
+    }
+}
+
+fn crystal_layer_index(layer: Layer) -> usize {
+    usize::from(layer == Layer::Near)
+}
+
 impl SpriteSheet {
+    /// The crystal sprite for `design`, drawn radius `r` and rotation `angle`.
+    fn crystal(&self, layer: Layer, design: u8, r: f32, angle: f32) -> u32 {
+        use std::f32::consts::FRAC_PI_3;
+        let base = Layer::ALL.len() * BUCKETS * SUBPIXEL * SUBPIXEL
+            + FROST_VARIANTS * crate::sim::frost::LEVELS as usize;
+        let size = ((r - CRYSTAL_R_MIN).round().max(0.0) as usize).min(CRYSTAL_SIZES - 1);
+        let turn = angle.rem_euclid(FRAC_PI_3) / FRAC_PI_3 * CRYSTAL_ROTATIONS as f32;
+        let rot = turn.round() as usize % CRYSTAL_ROTATIONS;
+        let design = design as usize % CRYSTAL_DESIGNS;
+        let i = ((crystal_layer_index(layer) * CRYSTAL_DESIGNS + design) * CRYSTAL_SIZES + size)
+            * CRYSTAL_ROTATIONS
+            + rot;
+        (base + i) as u32
+    }
+
     /// The frost crystal sprite for `variant` (any number) at `level` 1..=LEVELS.
     pub fn frost(&self, variant: u8, level: u8) -> u32 {
         let flakes = Layer::ALL.len() * BUCKETS * SUBPIXEL * SUBPIXEL;
@@ -187,6 +299,18 @@ impl SpriteSheet {
         for v in 0..FROST_VARIANTS {
             for level in 1..=crate::sim::frost::LEVELS {
                 sprites.push(frost_sprite(v, level));
+            }
+        }
+        for layer in [Layer::Mid, Layer::Near] {
+            for design in 0..CRYSTAL_DESIGNS {
+                for size in 0..CRYSTAL_SIZES {
+                    let r = CRYSTAL_R_MIN + size as f32;
+                    for rot in 0..CRYSTAL_ROTATIONS {
+                        let angle =
+                            rot as f32 * std::f32::consts::FRAC_PI_3 / CRYSTAL_ROTATIONS as f32;
+                        sprites.push(crystal_sprite(design, r, angle, layer));
+                    }
+                }
             }
         }
         Self { sprites }
@@ -335,7 +459,18 @@ impl Renderer {
     }
 
     fn place(&self, f: &Flake, output: Rect) -> SpriteDraw {
-        self.place_at(f.x, f.y, f.r, f.layer, output)
+        let Some(design) = f.crystal else {
+            return self.place_at(f.x, f.y, f.r, f.layer, output);
+        };
+        let sprite = self
+            .sheet
+            .crystal(f.layer, design, f.visual_radius(), f.angle);
+        let c = self.sheet.get(sprite).half as f32 + 0.5;
+        SpriteDraw {
+            sprite,
+            x: (f.x - output.x as f32 - c).round() as i32,
+            y: (f.y - output.y as f32 - c).round() as i32,
+        }
     }
 
     /// The sprite for a disc of radius `r` centred at global (`x`, `y`).
@@ -1280,6 +1415,49 @@ mod tests {
         assert_eq!(quantise(3.26), (3, 1));
         assert_eq!(quantise(3.9), (4, 0));
         assert_eq!(quantise(-0.25), (-1, 3));
+    }
+
+    #[test]
+    fn crystal_sprites_have_six_arms() {
+        use std::f32::consts::FRAC_PI_3;
+        let sheet = SpriteSheet::new();
+        assert_eq!(
+            sheet.len(),
+            sheet.crystal(
+                Layer::Near,
+                CRYSTAL_DESIGNS as u8 - 1,
+                99.0,
+                FRAC_PI_3 * 0.95
+            ) as usize
+                + 1,
+            "crystals are the last sprites"
+        );
+        for design in 0..CRYSTAL_DESIGNS as u8 {
+            let id = sheet.crystal(Layer::Near, design, 9.0, 0.0);
+            let s = sheet.get(id);
+            assert_eq!(s.layer, Layer::Near);
+            let at = |x: f32, y: f32| {
+                let c = s.half as f32 + 0.5;
+                s.alpha[((c + y).floor() as u32 * s.size + (c + x).floor() as u32) as usize]
+            };
+            for k in 0..6 {
+                let a = k as f32 * FRAC_PI_3;
+                // On each arm near its tip: snow. Between two arms: clear.
+                assert!(
+                    at(a.cos() * 8.0, a.sin() * 8.0) > 100,
+                    "design {design} arm {k}"
+                );
+                let b = a + FRAC_PI_3 / 2.0;
+                assert!(
+                    at(b.cos() * 8.5, b.sin() * 8.5) < 60,
+                    "design {design} gap {k}"
+                );
+            }
+        }
+        // Rotation picks a different sprite; a 60° turn looks the same.
+        let r0 = sheet.crystal(Layer::Mid, 0, 6.0, 0.0);
+        assert_ne!(r0, sheet.crystal(Layer::Mid, 0, 6.0, 0.4));
+        assert_eq!(r0, sheet.crystal(Layer::Mid, 0, 6.0, FRAC_PI_3));
     }
 
     #[test]

@@ -10,6 +10,12 @@ pub const WRAP_MARGIN: f32 = 8.0;
 /// Recycled flakes respawn up to this far above the top edge, so they
 /// don't arrive in a visible row.
 pub const SPAWN_HEIGHT: f32 = 40.0;
+/// Share of mid and near flakes drawn as six-armed crystals.
+pub const CRYSTAL_SHARE: f32 = 0.12;
+/// Crystal designs (see `render::crystal_sprite`).
+pub const CRYSTAL_DESIGNS: u8 = 4;
+/// A crystal is drawn this many times wider than its physics radius.
+pub const CRYSTAL_SCALE: f32 = 2.4;
 
 /// Depth layer. Nearer flakes are bigger, brighter, faster and react more to wind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -106,6 +112,11 @@ pub struct Flake {
     pub y: f32,
     pub r: f32,
     pub layer: Layer,
+    /// `Some(design)`: drawn as a six-armed crystal instead of a soft dot.
+    pub crystal: Option<u8>,
+    /// Rotation (radians); crystals turn slowly as they fall.
+    pub angle: f32,
+    spin: f32,
     fall: f32,
     sway_amp: f32,
     sway_freq: f32,
@@ -122,14 +133,28 @@ fn phase_sin(t: f64, freq: f32, phase: f32) -> f32 {
 }
 
 impl Flake {
+    /// Radius as drawn (crystals are bigger than their physics radius).
+    pub fn visual_radius(&self) -> f32 {
+        if self.crystal.is_some() {
+            self.r * CRYSTAL_SCALE
+        } else {
+            self.r
+        }
+    }
+
     fn random(rng: &mut fastrand::Rng, bounds: &Rect, y: f32) -> Flake {
         let layer = Layer::pick(rng);
         let spec = layer.spec();
+        let crystal =
+            (layer != Layer::Far && rng.f32() < CRYSTAL_SHARE).then(|| rng.u8(..CRYSTAL_DESIGNS));
         Flake {
             x: bounds.x as f32 + rng.f32() * bounds.w as f32,
             y,
             r: lerp_range(rng, spec.radius),
             layer,
+            crystal,
+            angle: rng.f32() * std::f32::consts::TAU,
+            spin: (rng.f32() - 0.5) * 1.6,
             fall: lerp_range(rng, spec.fall),
             sway_amp: lerp_range(rng, spec.sway),
             sway_freq: lerp_range(rng, (0.6, 1.8)),
@@ -140,7 +165,7 @@ impl Flake {
     /// A fresh flake just above the top edge.
     fn spawn_top(rng: &mut fastrand::Rng, bounds: &Rect) -> Flake {
         let mut f = Flake::random(rng, bounds, 0.0);
-        f.y = bounds.y as f32 - f.r - rng.f32() * SPAWN_HEIGHT;
+        f.y = bounds.y as f32 - f.visual_radius() - rng.f32() * SPAWN_HEIGHT;
         f
     }
 
@@ -223,8 +248,9 @@ impl Flakes {
             let y_before = f.y;
             f.x += (wind * f.layer.spec().wind + sway) * dt;
             f.y += f.fall * fall_speed * dt;
+            f.angle = (f.angle + f.spin * dt).rem_euclid(std::f32::consts::TAU);
             f.x = wrap(f.x, left, width);
-            if f.y - f.r > bottom || land(f, y_before) {
+            if f.y - f.visual_radius() > bottom || land(f, y_before) {
                 *f = Flake::spawn_top(rng, bounds);
             }
         }
@@ -369,6 +395,27 @@ mod tests {
     const B: Rect = Rect::new(-300, 200, 800, 600);
 
     #[test]
+    fn some_near_flakes_are_crystals_never_far_ones() {
+        let mut fl = Flakes::new(3);
+        fl.scatter(5000, &B);
+        let crystals: Vec<Flake> = fl.iter().filter(|f| f.crystal.is_some()).copied().collect();
+        let near = fl.iter().filter(|f| f.layer != Layer::Far).count();
+        let share = crystals.len() as f32 / near as f32;
+        assert!((0.08..0.16).contains(&share), "share {share}");
+        assert!(crystals.iter().all(|f| f.layer != Layer::Far));
+        assert!(crystals.iter().all(|f| f.crystal < Some(CRYSTAL_DESIGNS)));
+        let a0: Vec<f32> = crystals.iter().map(|f| f.angle).collect();
+        fl.step(0.5, 0.0, 0.0, 1.0, &B);
+        let turned = fl
+            .iter()
+            .filter(|f| f.crystal.is_some())
+            .zip(&a0)
+            .filter(|(f, a)| (f.angle - **a).abs() > 1e-3)
+            .count();
+        assert!(turned > crystals.len() / 2, "crystals spin");
+    }
+
+    #[test]
     fn wrap_stays_in_range() {
         for x in [-1000.0, -0.000_01, 0.0, 99.999, 100.0, 1e6] {
             let w = wrap(x, 0.0, 100.0);
@@ -382,7 +429,7 @@ mod tests {
         flakes.scatter(500, &B);
         let mut wind = Wind::new(4, 5.0);
         let (left, right) = (B.x as f32 - WRAP_MARGIN, B.right() as f32 + WRAP_MARGIN);
-        let top = B.y as f32 - SPAWN_HEIGHT - 4.0;
+        let top = B.y as f32 - SPAWN_HEIGHT - 4.0 * CRYSTAL_SCALE;
         let mut t = 0.0;
         for _ in 0..1200 {
             t += 1.0 / 60.0;
@@ -390,7 +437,10 @@ mod tests {
             flakes.step(1.0 / 60.0, t, wind.current(), 1.0, &B);
             for f in flakes.iter() {
                 assert!(f.x >= left && f.x < right, "x out of bounds: {f:?}");
-                assert!(f.y >= top && f.y - f.r <= B.bottom() as f32, "y: {f:?}");
+                assert!(
+                    f.y >= top && f.y - f.visual_radius() <= B.bottom() as f32,
+                    "y: {f:?}"
+                );
             }
         }
         assert_eq!(flakes.len(), 500);

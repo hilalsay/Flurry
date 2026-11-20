@@ -54,6 +54,9 @@ The tray menu has the same controls.
 
 ### Playing with the snow
 
+About one in eight of the nearer flakes is a real six-armed snow crystal (four designs) that turns
+slowly as it falls.
+
 - **Roll a snowball**: move the mouse sideways through a snow pile (on the panel or a window top).
   Keep pushing and it grows.
 - **Carry it**: point at the top half of a snowball (the cursor turns into a hand), then click and
